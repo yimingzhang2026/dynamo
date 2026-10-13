@@ -113,9 +113,10 @@ No benchmark or hosted API call is made by preparation or plan inspection.
 
 `comparison.mac.yaml` reserves up to three simultaneous jobs, two Linux VM CPU
 slots per job and one JEV job at a time. The intended Docker Desktop VM has
-32 GiB RAM; the dedicated container is capped at 28 GiB and six CPUs. This
-leaves 16 GiB of the Mac's 48 GiB outside the VM and 2 GiB inside the container
-for supervisor headroom. CPU affinity separates jobs inside Linux; it does not
+32 GiB RAM; the dedicated container is capped at 30 GiB and six CPUs. Planning
+uses 28 GiB, with another 2 GiB reserved inside that budget. This leaves 16 GiB
+of the Mac's 48 GiB outside the VM and room for resident runtime overhead plus
+free supervisor headroom. CPU affinity separates jobs inside Linux; it does not
 pin Docker's virtual CPUs to specific Apple physical cores.
 
 The launcher checks cgroup v2 CPU and memory limits, as well as Linux's reported

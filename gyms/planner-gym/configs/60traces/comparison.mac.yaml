@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Linux ARM container on the 48 GiB Mac: VM 32 GiB, container 28 GiB / 6 CPUs.
+# Linux ARM on the 48 GiB Mac: VM 32 GiB, container 30 GiB / 6 CPUs.
+# Plan against 28 GiB so existing runtime overhead does not consume free reserve.
 worker_limits:
   min_total: 2
   max_total: 16
