@@ -12,6 +12,9 @@ allocation, engine parallelism and latency targets.
 Start with the [trace inventory and experiment guide](docs/traces-60.md).
 The [interactive inventory](docs/traces-60.html) can filter by experiment or source;
 [CSV](docs/traces-60.csv) contains exact sizes and all case settings.
+The [non-learning comparison plan](docs/comparison-60.md) prepares 268 dynamic
+runs with a shared 2–16 total-worker range, short-trace-only JEV and bounded
+CPU/memory parallelism. Preparation and plan inspection do not execute benchmarks.
 
 ## Prepare and validate
 

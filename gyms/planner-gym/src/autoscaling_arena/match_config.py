@@ -20,6 +20,7 @@ from typing import Any, Iterator, Mapping, Optional, Sequence
 import yaml
 from autoscaling_arena.substrates import DEFAULT_COLD_START_DELAY_S, SUBSTRATES
 from autoscaling_arena.trace_preparation import TracePreparationConfig
+from autoscaling_arena.worker_limits import WorkerLimits
 from autoscaling_arena.workloads import WORKLOADS, validate_mooncake_trace
 
 SCHEMA_VERSION = 1
@@ -101,7 +102,7 @@ _JEV_DEFAULTS = {
     "timeout_s": 5.0,
     "min_confidence": 0.0,
     "history_ticks": 4,
-    "max_calls": 500,
+    "max_calls": 600,
     "failure_mode": "raise",
 }
 _REACTIVE_CONFIG_KEYS = frozenset(
@@ -449,6 +450,7 @@ class SimBackendConfig:
     replay: ReplayConfig
     autoscalers: tuple[SimAutoscalerConfig, ...]
     planner_config_path: Optional[Path] = None
+    worker_limits: Optional[WorkerLimits] = None
 
 
 @dataclass(frozen=True)
@@ -795,6 +797,7 @@ def _parse_sim_backend(data: Mapping[str, Any], *, base_dir: Path) -> SimBackend
             "engines",
             "topology",
             "gpu_budget",
+            "worker_limits",
             "router",
             "planner_config",
             "replay",
@@ -944,6 +947,17 @@ def _parse_sim_backend(data: Mapping[str, Any], *, base_dir: Path) -> SimBackend
         "backend.gpu_budget",
         positive=True,
     )
+    worker_limits = None
+    if "worker_limits" in data:
+        bounds = _mapping(data["worker_limits"], "backend.worker_limits")
+        _only_keys(bounds, {"min_total", "max_total"}, "backend.worker_limits")
+        try:
+            worker_limits = WorkerLimits(
+                min_total=_required(bounds, "min_total", "backend.worker_limits"),
+                max_total=_required(bounds, "max_total", "backend.worker_limits"),
+            )
+        except ValueError as exc:
+            raise MatchConfigError(f"backend.worker_limits: {exc}") from exc
 
     if topology == "disagg":
         assert engines.prefill is not None and engines.decode is not None
@@ -968,12 +982,13 @@ def _parse_sim_backend(data: Mapping[str, Any], *, base_dir: Path) -> SimBackend
             base_dir=base_dir,
             model=model,
             engines=engines,
+            worker_limits=worker_limits,
         )
         for i, item in enumerate(items)
     )
     _unique_names([entry.name for entry in autoscalers], "backend.autoscalers")
 
-    return SimBackendConfig(
+    backend = SimBackendConfig(
         type="sim",
         substrate=substrate,
         model=model,
@@ -990,6 +1005,62 @@ def _parse_sim_backend(data: Mapping[str, Any], *, base_dir: Path) -> SimBackend
         ),
         autoscalers=autoscalers,
         planner_config_path=planner_config_path,
+        worker_limits=worker_limits,
+    )
+    if worker_limits is not None:
+        for autoscaler in autoscalers:
+            targets = feasible_worker_targets(backend, autoscaler)
+            if (autoscaler.start.prefill, autoscaler.start.decode) not in targets:
+                raise MatchConfigError(
+                    f"backend.autoscalers.{autoscaler.name}: starting fleet must satisfy "
+                    "worker_limits, GPU budget and pool bounds"
+                )
+    return backend
+
+
+def feasible_worker_targets(
+    backend: SimBackendConfig, autoscaler: SimAutoscalerConfig
+) -> tuple[tuple[int, int], ...]:
+    """The common allocation layer intersects total limits with policy pool bounds."""
+    if backend.worker_limits is None:
+        raise ValueError("backend.worker_limits is required")
+    limits = backend.worker_limits
+    cfg = autoscaler.config
+    bounds = {
+        "min_prefill": int(cfg.get("min_prefill", cfg.get("min_replicas", 1))),
+        "max_prefill": int(
+            cfg.get("max_prefill", cfg.get("max_replicas", limits.max_total))
+        ),
+        "min_decode": int(cfg.get("min_decode", cfg.get("min_replicas", 1))),
+        "max_decode": int(
+            cfg.get("max_decode", cfg.get("max_replicas", limits.max_total))
+        ),
+    }
+    if autoscaler.type == "planner":
+        bounds["min_prefill"] = int(
+            backend.planner_config.get(
+                "prefill_min_endpoint", backend.planner_config.get("min_endpoint", 1)
+            )
+        )
+        bounds["min_decode"] = int(
+            backend.planner_config.get(
+                "decode_min_endpoint", backend.planner_config.get("min_endpoint", 1)
+            )
+        )
+    p_engine = backend.engines.prefill
+    d_engine = (
+        backend.engines.decode
+        if backend.topology == "disagg"
+        else backend.engines.aggregate
+    )
+    if d_engine is None:
+        raise ValueError("active decode/aggregate engine is required")
+    return limits.targets(
+        topology=backend.topology,
+        gpu_budget=backend.gpu_budget,
+        prefill_gpus=p_engine.num_gpus if p_engine is not None else 0,
+        decode_gpus=d_engine.num_gpus,
+        **bounds,
     )
 
 
@@ -1281,6 +1352,7 @@ def _parse_sim_autoscaler(
     base_dir: Path,
     model: ModelConfig,
     engines: SimEnginesConfig,
+    worker_limits: Optional[WorkerLimits] = None,
 ) -> SimAutoscalerConfig:
     path = f"backend.autoscalers[{index}]"
     data = _mapping(value, path)
@@ -1434,7 +1506,7 @@ def _parse_sim_autoscaler(
             int(adapter_config.get("max_prefill", 16)) if topology == "disagg" else 0
         )
         maximum_gpus = max_prefill * prefill_num_gpus + max_decode * decode_num_gpus
-        if maximum_gpus > gpu_budget:
+        if maximum_gpus > gpu_budget and worker_limits is None:
             raise MatchConfigError(
                 f"{path}.config: configured/default maximum fleet requires "
                 f"{maximum_gpus} GPUs, exceeding backend.gpu_budget={gpu_budget}; "
@@ -1445,7 +1517,7 @@ def _parse_sim_autoscaler(
         # for both pools at their ceiling (prefill costs zero in aggregate mode).
         max_replicas = int(adapter_config["max_replicas"])
         maximum_gpus = max_replicas * (prefill_num_gpus + decode_num_gpus)
-        if maximum_gpus > gpu_budget:
+        if maximum_gpus > gpu_budget and worker_limits is None:
             raise MatchConfigError(
                 f"{path}.config: configured/default maximum fleet requires "
                 f"{maximum_gpus} GPUs, exceeding backend.gpu_budget={gpu_budget}; "
@@ -1676,12 +1748,12 @@ def _validate_adapter_values(
         "slo_itl_ms",
         "smoothing_alpha",
         "reactive_queue_threshold",
-        "cold_start_s",
         "rho_min",
         "rho_window_s",
         "kv_transfer_gbps",
     }
     nonnegative_float_fields = {
+        "cold_start_s",
         "decode_kv_up",
         "decode_kv_down",
         "tolerance",

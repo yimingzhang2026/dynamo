@@ -89,7 +89,7 @@ class JevAutoscaler(_NoopRegressionBootstrap):
         timeout_s: float = 5,
         min_confidence: float = 0,
         history_ticks: int = 4,
-        max_calls: int = 500,
+        max_calls: int = 600,
         failure_mode: str = "raise",
         decision_log: Path | None = None,
         context: dict[str, Any] | None = None,
@@ -228,6 +228,7 @@ class JevAutoscaler(_NoopRegressionBootstrap):
                     "Protect the latency objectives while avoiding idle GPU allocation. "
                     f"Use `current.pools.{role}`, `current.traffic`, and `history` to judge whether capacity should increase, hold, or decrease. "
                     "The latency objectives and worker costs are in `context`. "
+                    "When `context.worker_limits` is present, the combined targets across active pools must stay within its min_total and max_total. "
                     "Expected replicas include workers still starting; ready replicas serve traffic. "
                     "Starting workers need the configured cold-start delay. Avoid cancelling needed pending capacity. "
                     "A null observation is unknown, not zero. SLO values are objectives, not measured latency. "

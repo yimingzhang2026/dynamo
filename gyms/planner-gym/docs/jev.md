@@ -22,8 +22,10 @@ hosted policy calls.
 
 One Choice question per pool selects from the current expected replica count
 and a bounded step up/down. Questions share one state and one HTTP request.
-Code constructs valid targets; Match Config rejects combined pool maxima above
-the GPU budget. The default step is one replica and the cadence is 15 simulated
+Code constructs per-pool targets. Without `backend.worker_limits`, Match Config
+rejects combined pool maxima above the GPU budget. With shared worker limits,
+the common allocation layer enforces the feasible total and records adjustments.
+The default step is one replica and the cadence is 15 simulated
 seconds. Starting workers are included in the expected count.
 
 State includes aggregate queue/token backlog, KV utilization, ready and expected
@@ -39,6 +41,8 @@ current expected target. Default `failure_mode: raise` fails on a timeout, API
 error, malformed answer, or pinned-model mismatch. `failure_mode: hold` is a
 separate reliability experiment; it holds both targets and logs the error.
 Exhausting `max_calls` always stops the run.
+The default cap is 600 calls. The [60-case comparison](comparison-60.md) explicitly
+sets the same cap and excludes every one-day and seven-day case from JEV.
 
 ## Evidence and interpretation
 

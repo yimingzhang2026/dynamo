@@ -35,6 +35,7 @@ from autoscaling_arena.match_config import (
     SimAutoscalerConfig,
     SimBackendConfig,
     SLAProfileConfig,
+    feasible_worker_targets,
 )
 from autoscaling_arena.measurement import AllocationConfig, MeasurementWindow
 from autoscaling_arena.scorecard import SLOProfile
@@ -1010,6 +1011,9 @@ def _run_sim_item(
             "jev_context": {
                 "slo": asdict(profile),
                 "gpu_budget": backend.gpu_budget,
+                "worker_limits": asdict(backend.worker_limits)
+                if backend.worker_limits
+                else None,
                 "engines": {
                     role: {
                         "gpus_per_worker": engine.num_gpus,
@@ -1025,6 +1029,10 @@ def _run_sim_item(
     factory = _build_sim_factory(
         autoscaler, topology=backend.topology, **factory_options
     )
+    if backend.worker_limits is not None:
+        factory = _limit_sim_factory(
+            factory, backend, autoscaler, run_dir / "worker-limit-decisions.jsonl"
+        )
     performance_model_metadata = _sim_performance_model_metadata(backend)
     replay_args: dict[str, Any] = {
         **replay_trace_args,
@@ -1155,6 +1163,9 @@ def _run_sim_item(
             },
             "planner_config": _redact_mapping_secrets(planner_config),
             "initial_replicas": asdict(autoscaler.start),
+            "worker_limits": asdict(backend.worker_limits)
+            if backend.worker_limits
+            else None,
             "autoscaler_config": _redact_mapping_secrets(dict(autoscaler.config)),
         },
         "artifacts": {
@@ -1182,6 +1193,10 @@ def _run_sim_item(
         },
     }
     result["execution"] = {"setup_wall_s": setup_wall_s, "replay_wall_s": replay_wall_s}
+    if backend.worker_limits is not None:
+        result["artifacts"]["worker_limit_decisions"] = str(
+            run_dir / "worker-limit-decisions.jsonl"
+        )
     if preparation is not None:
         result["evaluation"]["preparation"] = dict(preparation.manifest)
         result["artifacts"]["preparation_manifest"] = str(preparation.manifest_path)
@@ -1706,6 +1721,24 @@ _TELEMETRY_RL_TYPES = {
     "cloudai_rl_lstm": "CloudAIRLAutoscaleLSTM",
     "cloudai_rl_disagg": "CloudAIRLDisaggAutoscaler",
 }
+
+
+def _limit_sim_factory(factory, backend, autoscaler, log_path):
+    # Optional Dynamo types stay on the native simulation path.
+    from autoscaling_arena.adapters.limited import LimitedEngine
+
+    targets = feasible_worker_targets(backend, autoscaler)
+    log_path.touch(exist_ok=False)
+
+    def limited_factory(config, capabilities):
+        return LimitedEngine(
+            factory(config, capabilities),
+            targets=targets,
+            start=(autoscaler.start.prefill, autoscaler.start.decode),
+            log_path=log_path,
+        )
+
+    return limited_factory
 
 
 def _build_sim_factory(
