@@ -224,6 +224,7 @@ def make_config(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--policy", type=Path, default=SOURCE / "comparison.yaml")
     parser.add_argument(
         "--output", type=Path, default=ROOT / "runs/60traces-comparison"
     )
@@ -235,7 +236,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     output = args.output.resolve()
-    policy = yaml.safe_load((SOURCE / "comparison.yaml").read_text())
+    policy = yaml.safe_load(args.policy.read_text())
     parallel = policy["parallel"]
     if args.memory_gib is not None:
         parallel["memory_gib"] = args.memory_gib

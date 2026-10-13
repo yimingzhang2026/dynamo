@@ -30,7 +30,7 @@ ARENA_ROOT = Path(__file__).resolve().parents[1]
 PLANNER_CONFIG = ARENA_ROOT / "configs" / "planner.sim.example.yaml"
 CLOUDAI_EXAMPLE = ARENA_ROOT / "tests" / "fixtures" / "match.sim.cloudai.example.yaml"
 
-# ``substrate: gpt_oss`` pins the canonical AIS identity of the prefill engine.
+# ``substrate: gpt_oss`` resolves a separate AIS identity for each deployed role.
 EXPECTED_AIS_SPEC = {
     "type": "ais",
     "config": {
@@ -46,6 +46,10 @@ EXPECTED_AIS_SPEC = {
         "estimation_mode": "auto",
         "fallback_policy": "deny",
     },
+}
+EXPECTED_AIS_SPEC["decode_config"] = {
+    **EXPECTED_AIS_SPEC["config"],
+    "worker_type": "decode",
 }
 
 
@@ -297,6 +301,7 @@ def test_build_sim_factory_mpc_builds_fresh_capacity_models(
     assert len(created["ais"]) == 2 and not created["roofline"]
     assert created["ais"][0].kwargs == {
         "config": EXPECTED_AIS_SPEC["config"],
+        "decode_config": EXPECTED_AIS_SPEC["decode_config"],
         "max_kv_tokens": 4096,
         "max_num_seqs": 64,
     }

@@ -66,9 +66,10 @@ cold-start default is 30 seconds. These are generic defaults, not the settings
 of every benchmark case. Set targets, startup delay and replica limits
 explicitly when adding MPC to a case.
 
-The AIS predictor identity is resolved from the prefill engine in
-disaggregated mode, or the aggregate engine otherwise. Review that performance
-model when the two pools have different engine parallelism.
+In disaggregated mode, separate AIS sessions predict prefill and decode using
+each pool's deployed role and engine parallelism. Aggregate workers reuse one
+session for both phases. This preserves the TP4 prefill / TP8 decode identities
+in the low-concurrency cases.
 
 The static suite in `configs/60traces/` remains the baseline. Adding an MPC
 entry creates a separate dynamic experiment; it does not run automatically.

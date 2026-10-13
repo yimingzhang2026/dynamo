@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -21,6 +22,40 @@ from pathlib import Path
 import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
+CGROUP = Path("/sys/fs/cgroup")
+
+
+def memory_capacity(cgroup: Path = CGROUP) -> tuple[float, float]:
+    """Return total/available GiB, respecting a Linux container's memory ceiling."""
+    memory = psutil.virtual_memory()
+    total, available = memory.total, memory.available
+    limit_path = cgroup / "memory.max"
+    if limit_path.exists():
+        value = limit_path.read_text().strip()
+        if value != "max":
+            limit = int(value)
+            current = int((cgroup / "memory.current").read_text())
+            stats = dict(
+                line.split()
+                for line in (cgroup / "memory.stat").read_text().splitlines()
+            )
+            reclaimable = int(stats.get("inactive_file", 0))
+            total = min(total, limit)
+            available = min(available, max(0, limit - current + reclaimable))
+    return total / 1024**3, available / 1024**3
+
+
+def cpu_capacity(cpus: list[int], cgroup: Path = CGROUP) -> int:
+    """Respect CPU quota as well as affinity/topology (Docker reports VM topology)."""
+    quota_path = cgroup / "cpu.max"
+    if not quota_path.exists():
+        return len(cpus)
+    quota, period = quota_path.read_text().split()
+    return (
+        len(cpus)
+        if quota == "max"
+        else min(len(cpus), math.floor(int(quota) / int(period)))
+    )
 
 
 def physical_cpu_ids() -> list[int]:
@@ -100,12 +135,12 @@ def validate_plan(plan: dict, directory: Path) -> None:
             raise ValueError(f"{job['id']}: config changed; regenerate the plan")
 
 
-def execute(plan: dict, directory: Path) -> int:
+def execute(plan: dict, directory: Path, *, allow_blocked: bool = False) -> int:
     if sys.platform != "linux":
         raise RuntimeError("this execution setup requires a Linux native-replay host")
-    if plan["blocked_jobs"]:
+    if plan["blocked_jobs"] and not allow_blocked:
         raise ValueError(
-            "host resources cannot accommodate every job; regenerate for a larger host"
+            "host resources cannot accommodate every job; use --allow-blocked to run only scheduled jobs"
         )
     taskset = shutil.which("taskset")
     if taskset is None:
@@ -113,14 +148,17 @@ def execute(plan: dict, directory: Path) -> int:
     policy = plan["policy"]["parallel"]
     cpus = physical_cpu_ids()
     if (
-        len(cpus) < policy["physical_cores"]
-        or psutil.virtual_memory().total / 1024**3 < policy["memory_gib"] * 0.98
+        cpu_capacity(cpus) < policy["physical_cores"]
+        or memory_capacity()[0] < policy["memory_gib"] * 0.98
     ):
         raise RuntimeError(
             "actual host is smaller than the planned physical CPU/RAM capacity"
         )
     if (
-        any(j["planner"] == "jev" for j in plan["jobs"])
+        any(
+            j["planner"] == "jev" and j["id"] not in plan["blocked_jobs"]
+            for j in plan["jobs"]
+        )
         and not os.environ.get("TYPESAFE_API_KEY", "").strip()
     ):
         raise RuntimeError("TYPESAFE_API_KEY is required for the planned JEV jobs")
@@ -128,10 +166,24 @@ def execute(plan: dict, directory: Path) -> int:
     environment = {**os.environ, **policy["thread_environment"]}
     logs = directory / "logs"
     logs.mkdir(exist_ok=True)
+    status = {
+        "pending_resources": plan["blocked_jobs"],
+        "jobs": {job_id: "pending" for batch in plan["batches"] for job_id in batch},
+    }
+    # Exclusive creation prevents duplicate launchers and preserves prior status.
+    with (directory / "status.json").open("x") as stream:
+        stream.write(json.dumps(status, indent=2) + "\n")
+
+    def save_status():
+        temporary = directory / "status.json.tmp"
+        temporary.write_text(json.dumps(status, indent=2) + "\n")
+        temporary.replace(directory / "status.json")
+
+    save_status()
     for index, batch_ids in enumerate(plan["batches"], 1):
         batch = [jobs[job_id] for job_id in batch_ids]
         required = sum(j["memory_gib"] for j in batch) + policy["reserve_memory_gib"]
-        if psutil.virtual_memory().available / 1024**3 < required:
+        if memory_capacity()[1] < required:
             raise RuntimeError(
                 f"batch {index} requires {required} GiB available including host reserve"
             )
@@ -167,6 +219,8 @@ def execute(plan: dict, directory: Path) -> int:
                 )
                 stack.callback(stop_process, process)
                 processes.append(process)
+                status["jobs"][job["id"]] = "running"
+                save_status()
             while any(p.poll() is None for p in processes):
                 time.sleep(0.25)
             failures = [
@@ -174,6 +228,11 @@ def execute(plan: dict, directory: Path) -> int:
                 for job, process in zip(batch, processes)
                 if process.returncode != 0
             ]
+            for job, process in zip(batch, processes):
+                status["jobs"][job["id"]] = (
+                    "completed" if process.returncode == 0 else "failed"
+                )
+            save_status()
         if failures:
             print(
                 "Failed: "
@@ -189,6 +248,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("plan", type=Path)
     parser.add_argument(
+        "--allow-blocked",
+        action="store_true",
+        help="leave oversized jobs pending and execute the batches that fit",
+    )
+    parser.add_argument(
         "--execute",
         action="store_true",
         help="launch the prepared benchmarks and JEV API calls",
@@ -203,7 +267,7 @@ def main() -> int:
     if not args.execute:
         print("Plan inspection only. Nothing executed.")
         return 0
-    return execute(plan, path.parent)
+    return execute(plan, path.parent, allow_blocked=args.allow_blocked)
 
 
 if __name__ == "__main__":

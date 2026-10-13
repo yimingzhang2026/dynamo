@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Linux ARM container on the 48 GiB Mac: VM 32 GiB, container 28 GiB / 6 CPUs.
+worker_limits:
+  min_total: 2
+  max_total: 16
+planners: [mpc, planner, keda, reactive, jev]
+jev:
+  exclude_duration_at_least_s: 86400
+  max_calls: 600
+  poll_interval_s: 15
+parallel:
+  physical_cores: 6
+  memory_gib: 28
+  reserve_cores: 0
+  reserve_memory_gib: 2
+  max_parallel_runs: 3
+  cores_per_run: 2
+  max_parallel_jev: 1
+  exclusive_at_memory_gib: 20
+  memory_multiplier: 2
+  extra_memory_gib: 2
+  minimum_memory_gib: 8
+  thread_environment:
+    OMP_NUM_THREADS: '1'
+    OPENBLAS_NUM_THREADS: '1'
+    MKL_NUM_THREADS: '1'
+    NUMEXPR_NUM_THREADS: '1'
+    VECLIB_MAXIMUM_THREADS: '1'
+    RAYON_NUM_THREADS: '2'
+    TOKIO_WORKER_THREADS: '2'

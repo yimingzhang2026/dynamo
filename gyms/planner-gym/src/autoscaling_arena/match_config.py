@@ -1595,8 +1595,7 @@ def _resolve_cloudai_config(
     """Fill the backend-derived CloudAI settings in place.
 
     MPC: ``forward_model`` is expanded from its short name into the fully
-    resolved predictor spec (the AIS identity is pinned to the prefill engine,
-    because TTFT is a prefill-side quantity) and ``gpus_per_worker`` defaults to
+    resolved predictor spec for each deployed role and ``gpus_per_worker`` defaults to
     the decode engine's GPU count. RL: ``checkpoint_path`` is required and
     relative paths resolve against the Match Config's directory; the cold start
     and per-pool GPU counts come from the engines.
@@ -1627,29 +1626,34 @@ def _resolve_cloudai_config(
                 )
         kind = config["forward_model"]
         if kind == "ais":
-            # The canonical AIS identity of the TTFT engine, as Match Config
-            # renders it into that engine's ``ais_perf_config``.
-            perf_config = {
-                "model": model.ais_model_path,
-                "system": ttft_engine.system,
-                "backend": ttft_engine.ais_backend,
-                "backend_version": ttft_engine.ais_backend_version,
-                "tp": ttft_engine.tp_size,
-                "moe_tp_size": ttft_engine.moe_tp_size,
-                "moe_ep_size": ttft_engine.moe_ep_size,
-                "attention_dp": ttft_engine.attention_dp_size,
-                "nextn": ttft_engine.extra_args.get("ais_nextn"),
-                "worker_type": "prefill" if topology == "disagg" else "aggregated",
-                "estimation_mode": "auto",
-                "fallback_policy": "deny",
-            }
+
+            def perf_config(engine, role):
+                identity = {
+                    "model": model.ais_model_path,
+                    "system": engine.system,
+                    "backend": engine.ais_backend,
+                    "backend_version": engine.ais_backend_version,
+                    "tp": engine.tp_size,
+                    "moe_tp_size": engine.moe_tp_size,
+                    "moe_ep_size": engine.moe_ep_size,
+                    "attention_dp": engine.attention_dp_size,
+                    "nextn": engine.extra_args.get("ais_nextn"),
+                    "worker_type": role,
+                    "estimation_mode": "auto",
+                    "fallback_policy": "deny",
+                }
+                return {
+                    key: value for key, value in identity.items() if value is not None
+                }
+
             config["forward_model"] = {
                 "type": "ais",
-                "config": {
-                    key: value
-                    for key, value in perf_config.items()
-                    if value is not None
-                },
+                "config": perf_config(
+                    ttft_engine, "prefill" if topology == "disagg" else "aggregated"
+                ),
+                "decode_config": perf_config(
+                    cost_engine, "decode" if topology == "disagg" else "aggregated"
+                ),
             }
         else:
             config["forward_model"] = {"type": kind}

@@ -313,7 +313,8 @@ class AISCapacityModel(CapacityModel):
     whose TTFT the plan predicts (the same mapping Match Config renders into
     the engine's ``ais_perf_config``: model, system, backend, backend_version,
     tp, moe sizes, attention_dp, worker_type, estimation_mode, fallback_policy).
-    The session is created lazily on the first prediction.
+    ``decode_config`` supplies the deployed decode identity in disaggregated
+    mode. Aggregate workers reuse one session. Sessions load on first prediction.
     """
 
     def __init__(
@@ -321,6 +322,7 @@ class AISCapacityModel(CapacityModel):
         config: Mapping[str, Any],
         max_kv_tokens: Optional[int] = None,
         max_num_seqs: Optional[int] = None,
+        decode_config: Optional[Mapping[str, Any]] = None,
     ) -> None:
         super().__init__(max_kv_tokens=max_kv_tokens, max_num_seqs=max_num_seqs)
         if not config:
@@ -328,8 +330,12 @@ class AISCapacityModel(CapacityModel):
                 "AISCapacityModel needs the canonical AIS config of the TTFT engine"
             )
         self._config: dict[str, Any] = dict(config)
+        self._decode_config = dict(
+            decode_config if decode_config is not None else config
+        )
         self.fallbacks = 0  # AIS points the roofline model had to cover
         self._session = None
+        self._decode_session = None
         self._prefill_cache: dict[int, float] = {}
         self._decode_cache: dict[tuple[int, int, int], float] = {}
 
@@ -338,7 +344,13 @@ class AISCapacityModel(CapacityModel):
             return
         from dynamo._internal.ais import create_session
 
-        self._session = create_session(dict(self._config))
+        prefill_session = create_session(dict(self._config))
+        decode_session = (
+            prefill_session
+            if self._decode_config == self._config
+            else create_session(dict(self._decode_config))
+        )
+        self._session, self._decode_session = prefill_session, decode_session
 
     @staticmethod
     def _bucket(value: float, width: int) -> int:
@@ -374,7 +386,9 @@ class AISCapacityModel(CapacityModel):
         if key not in self._decode_cache:
             try:
                 total = float(
-                    self._session.predict_decode(batch_size=c, isl=key[1], osl=key[2])
+                    self._decode_session.predict_decode(
+                        batch_size=c, isl=key[1], osl=key[2]
+                    )
                 )
                 self._decode_cache[key] = total / key[2]
             except (RuntimeError, ValueError) as exc:

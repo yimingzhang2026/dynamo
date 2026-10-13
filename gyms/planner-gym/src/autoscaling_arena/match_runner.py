@@ -1812,7 +1812,9 @@ def _build_sim_factory(
             }
             if capacity_type == "ais":
                 capacity_model = mpc_module.AISCapacityModel(
-                    config=capacity_spec["config"], **caps_kwargs
+                    config=capacity_spec["config"],
+                    decode_config=capacity_spec["decode_config"],
+                    **caps_kwargs,
                 )
             else:
                 capacity_model = mpc_module.RooflineCapacityModel(**caps_kwargs)

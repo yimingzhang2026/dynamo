@@ -48,18 +48,16 @@ Dynamo's native policy. The limit applies to desired targets; draining workers
 can temporarily remain physically present during a transition.
 
 MPC receives each case's actual TTFT/ITL objectives and zero startup delay.
-Its existing single AIS capacity-model approximation remains unchanged; it uses
-the prefill engine identity in disaggregated mode, including where LC decode
-uses different parallelism. Review that approximation before interpreting LC
-MPC accuracy. Native runtime and AIS compatibility still require validation on
+Its AIS capacity model uses separate deployed-role identities for prefill and
+decode, including LC's TP4 prefill / TP8 decode. Native runtime and AIS compatibility require validation on
 the execution host; configuration validation alone is not a replay test.
 
 ## Parallel execution setup
 
 Use a **Linux CPU host with 32 physical cores and 256 GiB RAM**, the pinned
 AISimulate version and compatible Dynamo native bindings. No physical B300 GPUs
-are required for simulation. The Mac is suitable for editing, data preparation
-and config tests; its current environment does not have the native replay runtime.
+are required for simulation. The Mac can run Linux ARM native replay inside
+Docker Desktop with a smaller, explicitly partial campaign (see below).
 
 The selected initial setup is:
 
@@ -101,7 +99,8 @@ To inspect another host's capacity without executing:
 ```
 
 That profile leaves 20 runs blocked: four planners each on A-HT-S04, A-LC-L02,
-D-HT-S04, D-HT-L01 and D-HT-L02. The launcher refuses a partial campaign.
+D-HT-S04, D-HT-L01 and D-HT-L02. Partial execution requires `--allow-blocked`;
+oversized jobs remain recorded as pending in `status.json`.
 
 Only when ready on Linux, explicitly add `--execute` to `run_comparison.py`.
 It verifies config hashes, CPU/RAM capacity and available memory, applies CPU
@@ -109,6 +108,42 @@ affinity and thread caps, and verifies each trace hash before replay. Existing
 sessions/results/logs are not overwritten. A failed batch stops the campaign;
 inspect its logs and account for JEV calls already spent before retrying.
 No benchmark or hosted API call is made by preparation or plan inspection.
+
+### Mac execution
+
+`comparison.mac.yaml` reserves up to three simultaneous jobs, two Linux VM CPU
+slots per job and one JEV job at a time. The intended Docker Desktop VM has
+32 GiB RAM; the dedicated container is capped at 28 GiB and six CPUs. This
+leaves 16 GiB of the Mac's 48 GiB outside the VM and 2 GiB inside the container
+for supervisor headroom. CPU affinity separates jobs inside Linux; it does not
+pin Docker's virtual CPUs to specific Apple physical cores.
+
+The launcher checks cgroup v2 CPU and memory limits, as well as Linux's reported
+capacity. Resource estimates and complete trace windows remain unchanged.
+With the bundled reference measurements this schedules 220 runs in 98 batches:
+48 each for MPC, Dynamo, KEDA and Reactive, and all 28 eligible JEV runs. The
+remaining 48 runs (12 cases for each non-JEV planner) remain pending for RAM.
+Use the container's Python environment, not the macOS `.venv`:
+
+```bash
+/opt/venv/bin/python scripts/prepare_comparison.py \
+  --policy configs/60traces/comparison.mac.yaml --output runs/60traces-mac
+/opt/venv/bin/python scripts/run_comparison.py \
+  runs/60traces-mac/plan.json --allow-blocked --execute
+```
+
+First validate the installed native runtime with `scripts/smoke_comparison.py
+--include-jev --execute`. These are synthetic eight-request tests, kept outside
+the benchmark results. `--include-jev` makes live API calls with at most ten
+calls per smoke run. Campaign JEV runs retain the 600-call cap. Store the key
+outside the repository and inject `TYPESAFE_API_KEY` through the process
+environment. Never place it in a Match Config, plan, log or result.
+
+The Mac environment uses the matched `ai-dynamo` / `ai-dynamo-runtime`
+`1.6.0.dev20261013` Linux ARM wheels with `aisimulate==0.13.0.dev2`. The
+Planner Gym package is editable from this branch. The upstream nightly runtime
+is distinct from the historical static runtime; installed package versions are
+recorded in session provenance. Do not relabel the historical scores as a rerun.
 
 ## Four reports and fair ranking
 

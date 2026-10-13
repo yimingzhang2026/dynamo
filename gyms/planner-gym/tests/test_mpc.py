@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,40 @@ from autoscaling_arena.adapters.mpc import (  # noqa: E402
 
 # Per-worker KV capacity of the published agg substrate: 29920 blocks x 16.
 MAX_KV_TOKENS = 29920 * 16
+
+
+@pytest.mark.parametrize("disagg", [False, True])
+def test_ais_queries_use_deployed_pool_identity(monkeypatch, disagg):
+    created = []
+    queried = []
+
+    def create_session(config):
+        created.append(config)
+
+        def prefill(**kwargs):
+            queried.append(("prefill", config["worker_type"], config["tp"]))
+            return 12.0
+
+        def decode(**kwargs):
+            queried.append(("decode", config["worker_type"], config["tp"]))
+            return 16.0
+
+        return SimpleNamespace(predict_prefill=prefill, predict_decode=decode)
+
+    monkeypatch.setattr("dynamo._internal.ais.create_session", create_session)
+    prefill_config = {
+        "worker_type": "prefill" if disagg else "aggregated",
+        "tp": 4 if disagg else 8,
+    }
+    decode_config = {"worker_type": "decode" if disagg else "aggregated", "tp": 8}
+    model = AISCapacityModel(prefill_config, decode_config=decode_config)
+    assert model.prefill_ms(256) == 12
+    assert model.decode_step_ms(1, 256, 16) == 1
+    assert len(created) == (2 if disagg else 1)
+    assert queried == [
+        ("prefill", prefill_config["worker_type"], prefill_config["tp"]),
+        ("decode", decode_config["worker_type"], decode_config["tp"]),
+    ]
 
 
 class _LinearCapacityModel(CapacityModel):

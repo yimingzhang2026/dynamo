@@ -96,6 +96,14 @@ def test_all_generated_configs_have_the_same_feasible_worker_range(campaign, tmp
         if job["planner"] == "mpc":
             assert scaler.config["cold_start_s"] == 0
             assert scaler.config["slo_ttft_ms"] == base["slo_profiles"][0]["ttft_ms"]
+            model = scaler.config["forward_model"]
+            if job["group"] == "D-LC":
+                assert model["config"]["worker_type"] == "prefill"
+                assert model["config"]["tp"] == 4
+                assert model["decode_config"]["worker_type"] == "decode"
+                assert model["decode_config"]["tp"] == 8
+            elif job["group"].startswith("A"):
+                assert model["config"] == model["decode_config"]
         if job["planner"] == "jev":
             assert scaler.config["max_calls"] == 600
 
@@ -171,6 +179,8 @@ def test_linux_launcher_assigns_disjoint_cores_and_caps_threads(
     }
     monkeypatch.setattr(run.sys, "platform", "linux")
     monkeypatch.setattr(run, "physical_cpu_ids", lambda: list(range(0, 64, 2)))
+    monkeypatch.setattr(run, "cpu_capacity", lambda cpus: len(cpus))
+    monkeypatch.setattr(run, "memory_capacity", lambda: (256, 240))
     monkeypatch.setattr(run.shutil, "which", lambda name: "/usr/bin/taskset")
     monkeypatch.setattr(
         run.psutil,
@@ -205,6 +215,8 @@ def test_linux_launcher_refuses_insufficient_available_memory(
     }
     monkeypatch.setattr(run.sys, "platform", "linux")
     monkeypatch.setattr(run, "physical_cpu_ids", lambda: list(range(32)))
+    monkeypatch.setattr(run, "cpu_capacity", lambda cpus: len(cpus))
+    monkeypatch.setattr(run, "memory_capacity", lambda: (256, 200))
     monkeypatch.setattr(run.shutil, "which", lambda name: "/usr/bin/taskset")
     monkeypatch.setattr(
         run.psutil,
@@ -213,3 +225,40 @@ def test_linux_launcher_refuses_insufficient_available_memory(
     )
     with pytest.raises(RuntimeError, match="requires 206 GiB available"):
         run.execute(plan, tmp_path)
+
+
+def test_container_limits_override_vm_resources(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        run.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(total=32 * 1024**3, available=30 * 1024**3),
+    )
+    (tmp_path / "memory.max").write_text(str(28 * 1024**3))
+    (tmp_path / "memory.current").write_text(str(6 * 1024**3))
+    (tmp_path / "memory.stat").write_text(f"inactive_file {2 * 1024**3}\n")
+    (tmp_path / "cpu.max").write_text("600000 100000")
+    assert run.memory_capacity(tmp_path) == (28, 24)
+    assert run.cpu_capacity(list(range(18)), tmp_path) == 6
+    assert run.cpu_capacity([0, 1], tmp_path) == 2
+    (tmp_path / "memory.max").write_text("max")
+    (tmp_path / "cpu.max").write_text("max 100000")
+    assert run.memory_capacity(tmp_path) == (32, 30)
+    assert run.cpu_capacity(list(range(18)), tmp_path) == 18
+
+
+def test_oversized_cases_remain_pending_when_partial_execution_is_explicit(
+    campaign, tmp_path, monkeypatch
+):
+    _, policy = campaign
+    plan = {"jobs": [], "policy": policy, "batches": [], "blocked_jobs": ["large-case"]}
+    monkeypatch.setattr(run.sys, "platform", "linux")
+    monkeypatch.setattr(run, "physical_cpu_ids", lambda: list(range(32)))
+    monkeypatch.setattr(run, "cpu_capacity", lambda cpus: len(cpus))
+    monkeypatch.setattr(run, "memory_capacity", lambda: (256, 240))
+    monkeypatch.setattr(run.shutil, "which", lambda name: "/usr/bin/taskset")
+    with pytest.raises(ValueError, match="allow-blocked"):
+        run.execute(plan, tmp_path)
+    assert run.execute(plan, tmp_path, allow_blocked=True) == 0
+    assert json.loads((tmp_path / "status.json").read_text())["pending_resources"] == [
+        "large-case"
+    ]
