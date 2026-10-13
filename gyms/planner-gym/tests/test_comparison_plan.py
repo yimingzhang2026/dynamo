@@ -246,6 +246,71 @@ def test_container_limits_override_vm_resources(tmp_path, monkeypatch):
     assert run.cpu_capacity(list(range(18)), tmp_path) == 18
 
 
+def test_resume_runs_only_pending_selected_planners_and_keeps_failures(
+    campaign, tmp_path, monkeypatch
+):
+    jobs, policy = campaign
+    selected = [
+        dict(job, config=f"{job['id']}.yaml", session=f"sessions/{job['id']}")
+        for job in jobs
+        if job["case_id"] == "A-HT-S05"
+    ]
+    states = {j["id"]: "pending" for j in selected}
+    states[selected[0]["id"]] = "completed"
+    states[selected[1]["id"]] = "failed"
+    (tmp_path / "status.json").write_text(
+        json.dumps({"jobs": states, "pending_resources": []})
+    )
+    plan = {
+        "jobs": selected,
+        "policy": policy,
+        "batches": [[j["id"]] for j in selected],
+        "blocked_jobs": [],
+    }
+    monkeypatch.setattr(run.sys, "platform", "linux")
+    monkeypatch.setattr(run, "physical_cpu_ids", lambda: list(range(32)))
+    monkeypatch.setattr(run, "cpu_capacity", lambda cpus: len(cpus))
+    monkeypatch.setattr(run, "memory_capacity", lambda: (256, 240))
+    monkeypatch.setattr(run.shutil, "which", lambda name: "/usr/bin/taskset")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    commands = []
+
+    def launch(command, **kwargs):
+        commands.append(command)
+        code = 1 if len(commands) == 1 else 0
+        return SimpleNamespace(returncode=code, poll=lambda: code)
+
+    monkeypatch.setattr(run.subprocess, "Popen", launch)
+    assert (
+        run.execute(
+            plan,
+            tmp_path,
+            resume_pending=True,
+            planners={"mpc", "planner", "keda", "reactive"},
+            keep_going=True,
+        )
+        == 1
+    )
+    after = json.loads((tmp_path / "status.json").read_text())["jobs"]
+    assert len(commands) == 2
+    assert after[selected[0]["id"]] == "completed"
+    assert after[selected[1]["id"]] == "failed"
+    assert after[selected[2]["id"]] == "failed"
+    assert after[selected[3]["id"]] == "completed"
+    assert after[selected[4]["id"]] == "pending"
+    assert (
+        run.execute(
+            plan,
+            tmp_path,
+            resume_pending=True,
+            planners={"mpc", "planner", "keda", "reactive"},
+            keep_going=True,
+        )
+        == 1
+    )
+    assert len(commands) == 2  # Neither failures nor completed runs are retried.
+
+
 def test_oversized_cases_remain_pending_when_partial_execution_is_explicit(
     campaign, tmp_path, monkeypatch
 ):

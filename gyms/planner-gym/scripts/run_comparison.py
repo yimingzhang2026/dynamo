@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
@@ -135,7 +136,15 @@ def validate_plan(plan: dict, directory: Path) -> None:
             raise ValueError(f"{job['id']}: config changed; regenerate the plan")
 
 
-def execute(plan: dict, directory: Path, *, allow_blocked: bool = False) -> int:
+def execute(
+    plan: dict,
+    directory: Path,
+    *,
+    allow_blocked: bool = False,
+    resume_pending: bool = False,
+    planners: set[str] | None = None,
+    keep_going: bool = False,
+) -> int:
     if sys.platform != "linux":
         raise RuntimeError("this execution setup requires a Linux native-replay host")
     if plan["blocked_jobs"] and not allow_blocked:
@@ -156,7 +165,9 @@ def execute(plan: dict, directory: Path, *, allow_blocked: bool = False) -> int:
         )
     if (
         any(
-            j["planner"] == "jev" and j["id"] not in plan["blocked_jobs"]
+            j["planner"] == "jev"
+            and j["id"] not in plan["blocked_jobs"]
+            and (planners is None or j["planner"] in planners)
             for j in plan["jobs"]
         )
         and not os.environ.get("TYPESAFE_API_KEY", "").strip()
@@ -170,9 +181,24 @@ def execute(plan: dict, directory: Path, *, allow_blocked: bool = False) -> int:
         "pending_resources": plan["blocked_jobs"],
         "jobs": {job_id: "pending" for batch in plan["batches"] for job_id in batch},
     }
-    # Exclusive creation prevents duplicate launchers and preserves prior status.
-    with (directory / "status.json").open("x") as stream:
-        stream.write(json.dumps(status, indent=2) + "\n")
+    if resume_pending:
+        previous = json.loads((directory / "status.json").read_text())
+        if (
+            set(previous["jobs"]) != set(status["jobs"])
+            or previous["pending_resources"] != status["pending_resources"]
+        ):
+            raise ValueError("saved status does not match the plan")
+        if any(
+            value not in {"pending", "completed", "failed"}
+            for value in previous["jobs"].values()
+        ):
+            raise ValueError(
+                "resolve running/interrupted jobs before resuming pending work"
+            )
+        status = previous
+    else:
+        with (directory / "status.json").open("x") as stream:
+            stream.write(json.dumps(status, indent=2) + "\n")
 
     def save_status():
         temporary = directory / "status.json.tmp"
@@ -181,14 +207,22 @@ def execute(plan: dict, directory: Path, *, allow_blocked: bool = False) -> int:
 
     save_status()
     for index, batch_ids in enumerate(plan["batches"], 1):
-        batch = [jobs[job_id] for job_id in batch_ids]
+        batch = [
+            jobs[job_id]
+            for job_id in batch_ids
+            if status["jobs"][job_id] == "pending"
+            and (planners is None or jobs[job_id]["planner"] in planners)
+        ]
+        if not batch:
+            continue
         required = sum(j["memory_gib"] for j in batch) + policy["reserve_memory_gib"]
         if memory_capacity()[1] < required:
             raise RuntimeError(
                 f"batch {index} requires {required} GiB available including host reserve"
             )
         print(
-            f"Batch {index}/{len(plan['batches'])}: {', '.join(batch_ids)}", flush=True
+            f"Batch {index}/{len(plan['batches'])}: {', '.join(j['id'] for j in batch)}",
+            flush=True,
         )
         with ExitStack() as stack:
             processes = []
@@ -240,13 +274,35 @@ def execute(plan: dict, directory: Path, *, allow_blocked: bool = False) -> int:
                 + "; inspect logs before retrying. No automatic retries.",
                 file=sys.stderr,
             )
-            return 1
-    return 0
+            if not keep_going:
+                return 1
+    return int("failed" in status["jobs"].values())
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("plan", type=Path)
+    parser.add_argument(
+        "--wait-for-lock",
+        action="store_true",
+        help="wait for the active launcher to finish before resuming a selected queue",
+    )
+    parser.add_argument(
+        "--resume-pending",
+        action="store_true",
+        help="run only pending jobs; never retry failed or completed jobs",
+    )
+    parser.add_argument(
+        "--planners",
+        nargs="+",
+        choices=["mpc", "planner", "keda", "reactive", "jev"],
+        help="execute only these planners; leave others pending",
+    )
+    parser.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="record failures and continue independent batches without retrying",
+    )
     parser.add_argument(
         "--allow-blocked",
         action="store_true",
@@ -267,7 +323,21 @@ def main() -> int:
     if not args.execute:
         print("Plan inspection only. Nothing executed.")
         return 0
-    return execute(plan, path.parent, allow_blocked=args.allow_blocked)
+    with (path.parent / "launcher.lock").open("a") as lock:
+        if args.wait_for_lock:
+            print(
+                "Waiting for the active launcher to release the campaign lock.",
+                flush=True,
+            )
+        fcntl.flock(lock, fcntl.LOCK_EX | (0 if args.wait_for_lock else fcntl.LOCK_NB))
+        return execute(
+            plan,
+            path.parent,
+            allow_blocked=args.allow_blocked,
+            resume_pending=args.resume_pending,
+            planners=set(args.planners) if args.planners else None,
+            keep_going=args.keep_going,
+        )
 
 
 if __name__ == "__main__":

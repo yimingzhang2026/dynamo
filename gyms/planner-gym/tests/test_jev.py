@@ -133,6 +133,11 @@ def test_invalid_response_aborts_and_logs_without_applying_partial_decision(
     assert "a-secret" not in text
     row = json.loads(text)
     assert row["status"] == "error"
+    assert row["error_stage"] == {
+        "http": "http_or_json",
+        "model": "model",
+        "missing": "answer_keys",
+    }.get(fault, "choice_decode")
     assert row["targets"] == {"prefill": 1, "decode": 4}
 
 

@@ -109,6 +109,14 @@ sessions/results/logs are not overwritten. A failed batch stops the campaign;
 inspect its logs and account for JEV calls already spent before retrying.
 No benchmark or hosted API call is made by preparation or plan inspection.
 
+After investigating a failed batch, `--resume-pending` continues only jobs whose
+saved status is pending. It never retries failed or completed jobs. Add
+`--keep-going` to record individual failures and continue independent batches;
+the final exit status remains nonzero if any job failed. `--planners mpc planner
+keda reactive` selects a subset while retaining other jobs as pending. An
+exclusive campaign lock prevents overlapping launchers; `--wait-for-lock`
+queues a later launcher, such as a JEV-only continuation, behind the active one.
+
 ### Mac execution
 
 `comparison.mac.yaml` reserves up to three simultaneous jobs, two Linux VM CPU

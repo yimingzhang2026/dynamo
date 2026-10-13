@@ -267,6 +267,7 @@ class JevAutoscaler(_NoopRegressionBootstrap):
         started = time.perf_counter()
         self._calls += 1
         failure = None
+        stage = "http_or_json"
         try:
 
             async def evaluate():
@@ -275,6 +276,7 @@ class JevAutoscaler(_NoopRegressionBootstrap):
                 return response.json()
 
             result = await asyncio.wait_for(evaluate(), timeout=self._timeout)
+            stage = "model"
             if not isinstance(result, dict) or not isinstance(result.get("model"), str):
                 raise TypeError("missing response model")
             if (
@@ -283,10 +285,13 @@ class JevAutoscaler(_NoopRegressionBootstrap):
             ):
                 raise ValueError("response model differs from the pinned model")
             answers = result.get("answers")
+            stage = "answer_keys"
             if not isinstance(answers, dict) or set(answers) != set(questions):
                 raise ValueError("missing or unexpected answers")
             for role in self._roles:
+                stage = f"choice_{role}"
                 _validate_answer(answers[role], questions[role]["criteria"])
+            stage = "usage"
             if result.get("usage") is not None and not isinstance(
                 result["usage"], dict
             ):
@@ -303,7 +308,7 @@ class JevAutoscaler(_NoopRegressionBootstrap):
             # Record categories, never exception text or HTTP bodies that could
             # include credentials. A failed call leaves the whole fleet intact.
             failure = type(exc).__name__
-            record.update(status="error", error_type=failure)
+            record.update(status="error", error_type=failure, error_stage=stage)
             target = dict(current)
         finally:
             record.update(wall_latency_s=time.perf_counter() - started, targets=target)
