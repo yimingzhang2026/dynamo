@@ -1,106 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CloudAI MPC v3 — the v1 controller rebuilt one point at a time.
+"""Model predictive control for aggregate and disaggregated inference serving.
 
-Point 1 (capacity-model plant). v1 predicted TTFT as the AIS prefill time of
-one batch plus ``queue / n * avg_service_time`` and sized the fleet against a
-fixed ``max_rps_per_worker``. Neither is a worker's sustainable request rate,
-so every fleet looked feasible and the controller collapsed to one replica
-whenever the backlog cleared. :class:`CapacityModel` treats a worker as one
-processor shared between prefill and decode::
+The capacity model combines prefill work, decode batching and KV-cache limits
+into a sustainable request rate. A bounded online correction uses completions
+observed while the fleet is saturated. Arrival forecasts use coarse bins,
+EWMA levels, change-point detection and statistically significant trends.
 
-    T_p(isl)      = predict_prefill(batch=1, isl * (1 - kv_hit))
-    T_d(c)        = predict_decode(batch=c, isl, osl) / osl       # one decode step
-    c_sat         = min(kv_fraction * max_kv_tokens / (isl + osl), max_num_seqs)
-    mu            = 1 / (T_p + osl * T_d(c_sat) / c_sat)         # req/s per worker
+Each candidate fleet is evaluated over the cold-start delay plus the planning
+horizon. Pending replicas contribute GPU cost immediately and serving capacity
+only after they become ready. The objective approximates good requests per
+GPU-second using a Dinkelbach ratio objective with TTFT and ITL constraints.
 
-Capacity is evaluated at saturation (a backlog holds concurrency at the KV
-cap, where decode batching is best); the current load's concurrency only
-enters the ITL estimate. A multiplicative bias learned from completions during saturated ticks absorbs
-the remaining scheduler effects.
+Scale-up uses the mean arrival forecast. Scale-down requires no pending orders
+and a reduced fleet that stays below 75% utilization and half the TTFT budget
+under an 80th-percentile forecast for a full cold-start interval. A queue-spike
+floor accounts for the capacity already on its way.
 
-Point 2 (actuation lag). A replica ordered at ``t`` serves from
-``t + cold_start_s``. v1 planned 25 s ahead against a 30 s cold start, counted
-starting workers as capacity, and its reactive floor kept adding replicas for a
-backlog the in-flight workers were about to clear. v3 keeps an order book of
-pending replicas and plans over ``ceil(cold_start_s / dt) + horizon`` steps
-with the active-fleet schedule each candidate implies::
-
-    n_active[k] = ready + orders ready by step k (+ new orders once k*dt >= cold_start_s)
-    q[k+1]      = max(0, q[k] + (lambda[k] - n_active[k] * mu) * dt)
-    TTFT[k]     = q[k] / (n_active[k] * mu) + T_p
-
-Scale-downs cancel pending orders first and remove active capacity at once,
-which is what the simulator does. GPU cost is charged on the provisioned
-count, starting workers included, as the scorecard does. The queue-spike
-floor only adds replicas when the in-flight fleet cannot clear the backlog
-within the plan.
-
-Point 3 (every decision through the cost; scale-down rule). v1 had three
-paths that bypassed the candidate cost — a short-circuit before the optimizer,
-an eager scale-down after it and a scheduled scale-down — plus an adaptive GPU
-cost (``2**headroom``), an RPS-jump floor and an oscillation hold. With an
-honest plant model those paths flipped the fleet between one and two replicas
-on 5 s noise. v3 deletes
-them. The only floor left is the lag-aware queue-spike floor. Scale-down is
-governed by the asymmetry of being wrong: undoing a wrong scale-down costs a
-full cold start of SLO misses, undoing a wrong hold costs one GPU for one tick.
-A target below the provisioned fleet is admitted only when all three hold:
-
-* no orders are pending;
-* the reduced fleet's plan, driven by the 80th-percentile arrival forecast
-  (``rps + 0.84 * sqrt(rps / dt)``, Poisson counts per poll window), keeps
-  utilisation at or below ``downsize_utilisation`` and TTFT under half the
-  SLO at every step;
-* that has been true for one cold start of consecutive ticks.
-
-Scale-up uses the mean forecast.
-
-Point 4 (objective). The scorecard ranks by goodput per GPU-hour, a ratio.
-Dinkelbach's method maximises a ratio N/D through the linear surrogate
-``N - rho * D`` with ``rho`` the incumbent ratio, so the GPU weight is tied to
-the metric instead of a hand-picked constant. Per plan step::
-
-    served[k] = min(q[k] + lambda[k] dt, n_active[k] mu dt)
-    good[k]   = served[k] * s((SLO_ttft - TTFT[k]) / 0.1 SLO_ttft) * s((SLO_itl - ITL[k]) / 0.1 SLO_itl)
-    J(n)      = - sum_k ( good[k] - rho * n * gpus_per_worker * dt )      # n = provisioned
-
-``rho`` is the run's trailing goodput per GPU-second, estimated each tick from
-the plant model at the observed state (EMA over ``rho_window_s``) and floored
-at ``rho_min``. ITL comes from the capacity model: under saturation a decode
-step waits behind a prefill, ``ITL = T_p + T_d(c_sat)``, which is what the
-simulator shows (60-200 ms at one saturated worker); otherwise the
-processor-sharing form ``T_d(c) / (1 - lambda T_p)``. The switching penalties
-default to zero: hysteresis is the scale-down rule's job.
-
-Point 5 (forecast). A decision at ``t`` acts on ``[t + L, t + L + H]``, so
-that is the window to forecast, at a resolution where Poisson noise is small:
-at 1.5 rps a 5 s bin carries 36% noise, a 15 s bin 21%. v1's Holt smoother
-on 5 s bins fitted that noise and its change-point snap fired on it.
-:class:`_ArrivalForecaster` counts arrivals in 15 s bins, keeps an EWMA level
-with a time constant equal to the cold start, resets the level when a bin
-deviates from it by more than 2.5 Poisson standard deviations (a real step), and adds a linear
-trend only when the least-squares slope over the last two minutes is more
-than twice its standard error. It returns the mean per plan step and an 80th
-percentile, ``mean + 0.84 * sd`` with ``sd`` the estimator's Poisson variance
-plus the arrival variance over the plan window. ISL, OSL and KV hit rate feed
-the plant model through 60 s EWMAs instead of the raw 5 s means. The deadband
-is still v1's.
-
-Point 6 (disaggregated pools). Prefill and decode share only the arrival
-rate; each pool is sized by its own binding resource. A prefill worker is
-compute-bound: ``mu_p = 1 / (T_p(isl (1 - kv_hit)) + T_xfer(isl))`` with the
-KV transfer ``isl * kv_bytes_per_token / bandwidth``. A decode worker is
-KV/ITL-bound: ``mu_d = c_sat / (osl * T_d(c_sat))`` and ``ITL = T_d(c_d)`` at
-the pool's Little's-law concurrency, saturating (preemption) when the load
-exceeds ``n_d * mu_d``. The two pools form a series system whose throughput
-is ``min(n_p mu_p, n_d mu_d)``; the shared backlog (prefill queue plus decode
-admission queue) drains at that rate and ``TTFT = wait + T_p + T_xfer``. The
-decision is the pair ``(n_p, n_d)`` over the 8 x 8 grid, with an order book,
-a queue-spike floor and a scale-down timer per pool, and GPU cost
-``n_p * prefill_gpus + n_d * decode_gpus`` in the ratio objective. v1 applied
-one count to both pools.
+Disaggregated serving evaluates independent prefill/decode counts, accounts for
+KV transfer, and uses the slower pool as the throughput limit. See docs/mpc.md
+for the model equations and configuration.
 """
 
 from __future__ import annotations
@@ -132,9 +52,8 @@ _MAX_CONCURRENCY = 256.0
 def _roofline_ttft_ms(isl: float, batch_size: float = 1.0) -> float:
     """Analytical TTFT fallback in ms: base + linear(ISL), sublinear in batch.
 
-    Used when the AIS capacity model has no prefill estimate for an ISL (and by
-    ``RooflineCapacityModel``). Formerly ``RooflineForwardModel.estimate`` of the
-    retired v1 adapter; kept verbatim so published results stay reproducible.
+    Used when the AIS capacity model has no prefill estimate for an ISL, and by
+    ``RooflineCapacityModel``.
     """
     base_ttft = 10.0 + 0.2 * max(1.0, isl)
     batch_factor = 1.0 + 0.3 * math.log1p(max(0.0, batch_size - 1))
@@ -142,7 +61,7 @@ def _roofline_ttft_ms(isl: float, batch_size: float = 1.0) -> float:
 
 
 class _ArrivalForecaster:
-    """Arrival-rate forecaster over coarse bins (point 5).
+    """Arrival-rate forecaster over coarse bins.
 
     ``update`` takes the arrivals of one poll interval. Completed bins of
     ``bin_s`` seconds drive an EWMA level (time constant ``tau_s``) with a
@@ -252,7 +171,6 @@ class CapacityModel(abc.ABC):
             float(max_num_seqs) if max_num_seqs else _MAX_CONCURRENCY
         )
         self._bias = 1.0
-        self._bias_samples = 0
 
     # ---- engine primitives ------------------------------------------------ #
 
@@ -386,7 +304,6 @@ class CapacityModel(abc.ABC):
         ratio = measured_rate_per_worker / model
         ratio = min(4.0, max(0.25, ratio))
         self._bias = (1.0 - alpha) * self._bias + alpha * ratio
-        self._bias_samples += 1
 
 
 class AISCapacityModel(CapacityModel):
@@ -489,7 +406,7 @@ class RooflineCapacityModel(CapacityModel):
 
 
 class _PoolBook:
-    """Order book of one worker pool (point 6): pending replicas and their ready times."""
+    """Order book of one worker pool: pending replicas and their ready times."""
 
     def __init__(
         self, *, cold_start_s: float, dt: float, plan_steps: int, lag_steps: int
@@ -572,12 +489,8 @@ class _PoolBook:
         return out
 
 
-class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
-    """MPC over :class:`CapacityModel` with a cold-start order book and a scale-down rule.
-
-    Accepts the ``cloudai_mpc`` keys plus ``cold_start_s``. ``max_rps_per_worker``
-    is accepted and ignored: the capacity model supplies the per-worker rate.
-    """
+class MPCAutoscaler(_NoopRegressionBootstrap):
+    """MPC over a capacity model with pending replicas and guarded scale-down."""
 
     def __init__(
         self,
@@ -585,22 +498,13 @@ class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
         capacity_model: CapacityModel,
         mode: str = "agg",
         horizon: int = 5,
-        candidates: Optional[list[int]] = None,
         slo_ttft_ms: float = 200.0,
         slo_itl_ms: float = 50.0,
-        violation_weight: float = 100.0,
-        gpu_cost_per_s: float = 1.0,
         gpus_per_worker: int = 1,
         poll_interval_s: float = 5.0,
         scale_up_penalty: float = 0.0,
         scale_down_penalty: float = 0.0,
-        headroom_decay_ticks: int = 3,
-        stability_penalty: Optional[float] = None,
-        max_rps_per_worker: float = 10.0,
-        smoothing_alpha: float = 0.3,
         reactive_queue_threshold: float = 10.0,
-        reactive_rps_jump_ratio: float = 2.0,
-        kv_pressure_threshold: float = 0.8,
         min_replicas: int = 1,
         max_replicas: int = 16,
         cold_start_s: float = 30.0,
@@ -611,53 +515,39 @@ class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
         kv_bytes_per_token: Optional[int] = None,
         capabilities: Optional[WorkerCapabilities] = None,
     ) -> None:
-        del max_rps_per_worker  # superseded by the capacity model
         self._capacity = capacity_model
         self._mode = mode
-        self._horizon = horizon
-        self._candidates = candidates or list(range(min_replicas, max_replicas + 1))
         self._slo_ttft = slo_ttft_ms
         self._slo_itl = slo_itl_ms
-        self._violation_weight = violation_weight
-        self._gpu_cost = gpu_cost_per_s
         self._gpus_per_worker = gpus_per_worker
         self._poll_interval_s = poll_interval_s
         self._min_replicas = min_replicas
         self._max_replicas = max_replicas
         self._capabilities = capabilities
 
-        if stability_penalty is not None:
-            self._scale_up_penalty = stability_penalty * 0.3
-            self._scale_down_penalty = stability_penalty * 1.0
-        else:
-            self._scale_up_penalty = scale_up_penalty
-            self._scale_down_penalty = scale_down_penalty
-        self._headroom_decay_ticks = headroom_decay_ticks
+        self._scale_up_penalty = scale_up_penalty
+        self._scale_down_penalty = scale_down_penalty
 
         self._reactive_queue_threshold = reactive_queue_threshold
-        self._reactive_rps_jump_ratio = reactive_rps_jump_ratio
-        self._kv_pressure_threshold = kv_pressure_threshold
 
-        del smoothing_alpha  # v1 Holt parameter; superseded by _ArrivalForecaster
         self._deadband_fraction = 0.05
         self._shape_tau_s = 60.0
 
         self._current_replicas: int = min_replicas
         self._history: deque[dict] = deque(maxlen=100)
-        self._tick_count = 0
 
-        # Point 3: scale-down rule state and constants.
+        # Scale-down rule state and constants.
         self._downsize_utilisation = 0.75
         self._downsize_ticks = 0
 
-        # Point 4: Dinkelbach weight = trailing goodput per GPU-second.
+        # Dinkelbach weight = trailing goodput per GPU-second.
         self._rho_min = max(1e-6, rho_min)
         self._rho_window_s = max(poll_interval_s, rho_window_s)
         self._rho = self._rho_min
         self._good_ema: Optional[float] = None
         self._gpu_ema: Optional[float] = None
 
-        # Shape estimates for the plant model (60 s EWMAs, point 5).
+        # Shape estimates for the plant model (60 s EWMAs).
         self._isl_now: float = 512.0
         self._isl_ema: Optional[float] = None
         self._osl_ema: float = 128.0
@@ -669,7 +559,7 @@ class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
         self._prev_queue: int = 0
         self._prev_ready: int = 0
 
-        # Point 2: actuation lag. Pending replica orders as [ready_at_s, count]
+        # actuation lag. Pending replica orders as [ready_at_s, count]
         # and the plan horizon that covers the cold start.
         self._cold_start_s = max(0.0, cold_start_s)
         self._lag_steps = int(
@@ -689,7 +579,7 @@ class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
             plan_s=self._plan_steps * poll_interval_s,
         )
 
-        # Point 6: one order book per pool, per-pool GPU cost and KV transfer.
+        # one order book per pool, per-pool GPU cost and KV transfer.
         self._prefill_gpus = prefill_gpus_per_worker or gpus_per_worker
         self._kv_transfer_gbps = kv_transfer_gbps
         self._kv_bytes_per_token = kv_bytes_per_token
@@ -733,7 +623,7 @@ class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
             ),
         )
 
-    # ---- order book (point 2) --------------------------------------------- #
+    # ---- order book --------------------------------------------- #
 
     @property
     def pending_orders(self) -> int:
@@ -1085,13 +975,12 @@ class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
         self._forecaster.update(
             observed_rps * self._poll_interval_s, self._poll_interval_s
         )
-        self._tick_count += 1
 
         forecast_rps, forecast_hi = self._forecaster.forecast(
             self._plan_steps, self._poll_interval_s
         )
 
-        # Lag-aware queue-spike floor (point 2): the smallest target whose
+        # Lag-aware queue-spike floor: the smallest target whose
         # plan clears the backlog; never below the provisioned fleet while
         # orders are pending, so a marginal plan cannot cancel them.
         reactive_floor = self._min_replicas
@@ -1108,7 +997,7 @@ class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
         peak_rps = max(forecast_rps) if forecast_rps else observed_rps
         min_needed = self._min_stable_fleet(peak_rps)
 
-        # Scale-down rule (point 3): eligibility accrues only while no orders
+        # Scale-down rule: eligibility accrues only while no orders
         # are pending and one replica fewer stays feasible under the upper
         # forecast; it takes one cold start of consecutive ticks to unlock.
         if (
@@ -1171,7 +1060,7 @@ class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
         )
         return self._make_effects(t_s, best_action)
 
-    # ---- disaggregated pools (point 6) ------------------------------------ #
+    # ---- disaggregated pools ------------------------------------ #
 
     def _observe_traffic(self, traffic) -> tuple[float, float]:
         """Update the shape EWMAs; return (observed rps, observed isl)."""
@@ -1359,7 +1248,6 @@ class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
         self._forecaster.update(
             observed_rps * self._poll_interval_s, self._poll_interval_s
         )
-        self._tick_count += 1
         forecast_rps, forecast_hi = self._forecaster.forecast(
             self._plan_steps, self._poll_interval_s
         )
@@ -1387,7 +1275,7 @@ class CloudAIMPCV3Autoscaler(_NoopRegressionBootstrap):
                     floor_p, floor_d = a, b
                     break
 
-        # Scale-down eligibility per pool (point 3 rule).
+        # Scale-down eligibility per pool.
         for book, other_n, is_p in (
             (self._book_p, exp_d, True),
             (self._book_d, exp_p, False),

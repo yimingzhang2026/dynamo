@@ -6,7 +6,7 @@ schema_version: 1
 name: planner-vs-baselines-cloudai-sim
 description: >
   Registry-only aggregated example of the leaderboard roster without the hosted
-  Jev engine: Planner, KEDA, reactive, static-4, CloudAI MPC (cloudai-mpc) and
+  Jev engine: Planner, KEDA, reactive, static-4, MPC and
   the CloudAI offline-RL planner (cloudai-rl) over the 8 registry workloads
   (Mooncake anchor + 7 synthetic), one repetition, relaxed SLO, on the same
   substrate used by the adapter contract tests;
@@ -85,8 +85,8 @@ backend:
         num_decode: 4
         poll_interval_s: 5
 
-    - name: cloudai-mpc
-      type: cloudai_mpc_v3
+    - name: MPC
+      type: mpc
       start:
         decode: 1
       config:

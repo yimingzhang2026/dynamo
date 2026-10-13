@@ -7,10 +7,9 @@ Each adapter is a closed-loop policy the harness drives every tick (it observes
 fleet state and returns a fresh replica decision); we never replay a recorded
 decision log.
 
-The CloudAI adapters (MPC v3 and the offline-RL planner) pull in numpy and
-torch, which a Planner-only environment has no reason to install. They are
-exported lazily: ``from autoscaling_arena.adapters import CloudAIMPCV3Autoscaler``
-works, but the heavy imports only happen on first access.
+MPC and the CloudAI offline-RL adapters are exported lazily. The RL adapters
+load optional numerical and PyTorch dependencies on first access, while MPC
+loads its AIS performance model when configured to use it.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ from autoscaling_arena.adapters.reactive import ReactiveAutoscaler
 from autoscaling_arena.adapters.static import StaticAutoscaler
 
 _LAZY_EXPORTS = {
-    "CloudAIMPCV3Autoscaler": "autoscaling_arena.adapters.cloudai_mpc_v3",
+    "MPCAutoscaler": "autoscaling_arena.adapters.mpc",
     "CloudAIRLAutoscaleLSTM": "autoscaling_arena.adapters.cloudai_rl_lstm",
     "CloudAIRLDisaggAutoscaler": "autoscaling_arena.adapters.cloudai_rl_disagg",
 }
@@ -47,7 +46,7 @@ __all__ = [
     "StaticAutoscaler",
     "ReactiveAutoscaler",
     "KedaAutoscaler",
-    "CloudAIMPCV3Autoscaler",
+    "MPCAutoscaler",
     "CloudAIRLAutoscaleLSTM",
     "CloudAIRLDisaggAutoscaler",
     "planner_engine_factory",

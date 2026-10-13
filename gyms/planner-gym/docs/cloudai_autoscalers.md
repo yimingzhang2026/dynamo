@@ -1,11 +1,11 @@
-# CloudAI autoscalers for the Autoscaling Arena
+# MPC and CloudAI RL autoscalers for the Autoscaling Arena
 
-Two NVIDIA CloudAI planners join the Arena roster (Planner, KEDA port,
+MPC and the CloudAI RL planner join the Arena roster (Planner, KEDA port,
 reactive, static, Jev) as first-class Match Config autoscaler types:
 
 | Leaderboard entry | Class | Module | Approach |
 |---|---|---|---|
-| `cloudai-mpc` | `CloudAIMPCV3Autoscaler` (type `cloudai_mpc_v3`) | `adapters/cloudai_mpc_v3.py` | Model Predictive Control: a saturated-capacity plant model over AIS (AISimulate) prefill/decode predictions, a cold-start order book, a model-based scale-down rule, a goodput-per-GPU (Dinkelbach) objective with ITL, and a binned arrival forecaster; independent prefill/decode pools in disagg. Design and measured effect of each step: [cloudai_mpc_v3.md](cloudai_mpc_v3.md). |
+| `MPC` | `MPCAutoscaler` (type `mpc`) | `adapters/mpc.py` | Model Predictive Control: a saturated-capacity plant model over AIS (AISimulate) prefill/decode predictions, a cold-start order book, a model-based scale-down rule, a goodput-per-GPU (Dinkelbach) objective with ITL, and a binned arrival forecaster; independent prefill/decode pools in disagg. Controller design: [mpc.md](mpc.md). |
 | `cloudai-rl` (agg) | `CloudAIRLAutoscaleLSTM` (type `cloudai_rl_lstm`) | `adapters/cloudai_rl_lstm.py` | Offline-RL (CQL) policy over 27 current-interval replay-telemetry features, the last ten observations through a 32-unit LSTM, nine relative deltas with exact bounded-target masks, Q-only. Requires a compatible, explicitly supplied checkpoint. |
 | `cloudai-rl` (disagg) | `CloudAIRLDisaggAutoscaler` (type `cloudai_rl_disagg`) | `adapters/cloudai_rl_disagg.py` | Offline-RL (CQL) two-pool policy over 37 current-interval telemetry features plus its last requested targets, ten-step LSTM, one delta per pool from an additive two-head critic (prefill 1-16, decode 1-8), infeasible deltas masked, Q-only. Requires a compatible, explicitly supplied checkpoint. |
 
@@ -30,7 +30,7 @@ The RL planner additionally needs a Dynamo build whose
 `run_mocker_trace_replay()` exposes `telemetry_callback`; the runner refuses to
 start it on an older build.
 
-## CloudAI MPC (`cloudai_mpc_v3`)
+## MPC (`mpc`)
 
 Every 5 s the controller forecasts arrivals (15 s bins, EWMA level with the
 cold start as time constant, Poisson reset, significant trends only) and
@@ -52,10 +52,8 @@ Keys: `forward_model` (`ais` or `roofline`), `poll_interval_s`, `horizon`,
 `rho_min`, `rho_window_s`, `scale_up_penalty`, `scale_down_penalty`,
 `reactive_queue_threshold`, and in disagg `prefill_gpus_per_worker`,
 `kv_transfer_gbps`, `kv_bytes_per_token` (filled from the prefill engine when
-omitted). The remaining `cloudai_mpc` keys (`violation_weight`, `gpu_cost_per_s`,
-`headroom_decay_ticks`, `max_rps_per_worker`, `smoothing_alpha`,
-`reactive_rps_jump_ratio`, `kv_pressure_threshold`, `gpus_per_worker`) are
-accepted for compatibility with the published configs. `forward_model: ais`
+omitted). `gpus_per_worker` is the aggregate/decode worker GPU cost and is
+filled from that engine when omitted. `forward_model: ais`
 expands into the canonical AIS identity (`model`, `system`, `backend`,
 `backend_version`, `tp`, MoE sizes, `worker_type`) of the prefill (or aggregate)
 engine, the same identity Match Config renders into that engine's

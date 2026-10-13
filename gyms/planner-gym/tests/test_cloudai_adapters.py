@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Match Config and factory wiring of the CloudAI MPC adapter, plus the lazy exports.
+"""Match Config and factory wiring of MPC and the CloudAI RL lazy exports.
 
 Pure Python: no Dynamo, numpy or torch is needed. Adapter behaviour is covered
-by ``test_cloudai_mpc_v3.py`` and ``test_cloudai_rl_lstm_disagg.py``.
+by ``test_mpc.py`` and ``test_cloudai_rl_lstm_disagg.py``.
 """
 
 from __future__ import annotations
@@ -103,18 +103,18 @@ def _sim_autoscalers(path: Path) -> tuple[SimAutoscalerConfig, ...]:
 # --------------------------------------------------------------------------- #
 
 
-def test_cloudai_mpc_defaults_resolve_forward_model_from_backend(tmp_path: Path):
+def test_mpc_defaults_resolve_forward_model_from_backend(tmp_path: Path):
     (mpc,) = _sim_autoscalers(
         _write_sim_config(
             tmp_path,
             autoscalers="""
             - name: mpc
-              type: cloudai_mpc_v3
+              type: mpc
               start: {prefill: 1, decode: 1}
             """,
         )
     )
-    assert mpc.type == "cloudai_mpc_v3"
+    assert mpc.type == "mpc"
     assert mpc.config["forward_model"] == EXPECTED_AIS_SPEC
     assert mpc.config["gpus_per_worker"] == 1
     assert mpc.config["prefill_gpus_per_worker"] == 1  # disagg: prefill pool cost
@@ -122,7 +122,7 @@ def test_cloudai_mpc_defaults_resolve_forward_model_from_backend(tmp_path: Path)
     assert mpc.start.prefill == 1 and mpc.start.decode == 1
 
 
-def test_cloudai_mpc_roofline_in_agg_topology_resolves_without_engine_spec(
+def test_mpc_roofline_in_agg_topology_resolves_without_engine_spec(
     tmp_path: Path,
 ):
     (mpc,) = _sim_autoscalers(
@@ -131,7 +131,7 @@ def test_cloudai_mpc_roofline_in_agg_topology_resolves_without_engine_spec(
             topology="agg",
             autoscalers="""
             - name: mpc-lite
-              type: cloudai_mpc_v3
+              type: mpc
               start: {decode: 1}
               config: {forward_model: roofline}
             """,
@@ -147,7 +147,7 @@ def test_cloudai_mpc_roofline_in_agg_topology_resolves_without_engine_spec(
         (
             """
             - name: bad
-              type: cloudai_mpc_v3
+              type: mpc
               start: {prefill: 1, decode: 1}
               config: {min_prefill: 1}
             """,
@@ -156,16 +156,16 @@ def test_cloudai_mpc_roofline_in_agg_topology_resolves_without_engine_spec(
         (
             """
             - name: bad
-              type: cloudai_mpc_v3
+              type: mpc
               start: {prefill: 1, decode: 1}
               config: {smoothing_alpha: 1.5}
             """,
-            ("smoothing_alpha", "<= 1"),
+            ("smoothing_alpha", "unknown fields"),
         ),
         (
             """
             - name: bad
-              type: cloudai_mpc_v3
+              type: mpc
               start: {prefill: 1, decode: 1}
               config: {min_replicas: 5, max_replicas: 2}
             """,
@@ -174,7 +174,7 @@ def test_cloudai_mpc_roofline_in_agg_topology_resolves_without_engine_spec(
         (
             """
             - name: bad
-              type: cloudai_mpc_v3
+              type: mpc
               start: {prefill: 1, decode: 9}
             """,
             ("start.decode", "[1, 8]"),
@@ -182,7 +182,7 @@ def test_cloudai_mpc_roofline_in_agg_topology_resolves_without_engine_spec(
         (
             """
             - name: bad
-              type: cloudai_mpc_v3
+              type: mpc
               start: {prefill: 1, decode: 1}
               config: {max_replicas: 40}
             """,
@@ -211,11 +211,10 @@ def test_unknown_autoscaler_type_lists_cloudai_choices(tmp_path: Path):
         )
     message = str(excinfo.value)
     assert (
-        "cloudai_mpc_v3" in message
+        "mpc" in message
         and "cloudai_rl_lstm" in message
         and "cloudai_rl_disagg" in message
     )
-    assert "cloudai_mpc_v2" not in message and "cloudai_rl_v3" not in message
 
 
 def test_cloudai_fixture_expands_the_roster():
@@ -223,14 +222,14 @@ def test_cloudai_fixture_expands_the_roster():
     backend = config.backend
     assert isinstance(backend, SimBackendConfig)
     types_by_name = {entry.name: entry.type for entry in backend.autoscalers}
-    assert types_by_name["cloudai-mpc"] == "cloudai_mpc_v3"
+    assert types_by_name["MPC"] == "mpc"
     assert types_by_name["cloudai-rl"] == "cloudai_rl_lstm"
     assert set(types_by_name.values()) == {
         "planner",
         "keda",
         "reactive",
         "static",
-        "cloudai_mpc_v3",
+        "mpc",
         "cloudai_rl_lstm",
     }
     assert backend.topology == "agg" and backend.replay.telemetry_sample_interval_s == 5
@@ -259,21 +258,19 @@ def _install_fake_mpc_module(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    fake_module = types.ModuleType("autoscaling_arena.adapters.cloudai_mpc_v3")
+    fake_module = types.ModuleType("autoscaling_arena.adapters.mpc")
     fake_module.AISCapacityModel = FakeAISCapacityModel  # type: ignore[attr-defined]
     fake_module.RooflineCapacityModel = FakeRooflineCapacityModel  # type: ignore[attr-defined]
-    fake_module.CloudAIMPCV3Autoscaler = FakeMPC  # type: ignore[attr-defined]
+    fake_module.MPCAutoscaler = FakeMPC  # type: ignore[attr-defined]
     fake_adapters = types.ModuleType("autoscaling_arena.adapters")
-    fake_adapters.cloudai_mpc_v3 = fake_module  # type: ignore[attr-defined]
+    fake_adapters.mpc = fake_module  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "autoscaling_arena.adapters", fake_adapters)
-    monkeypatch.setitem(
-        sys.modules, "autoscaling_arena.adapters.cloudai_mpc_v3", fake_module
-    )
+    monkeypatch.setitem(sys.modules, "autoscaling_arena.adapters.mpc", fake_module)
     created["mpc_cls"] = FakeMPC
     return created
 
 
-def test_build_sim_factory_cloudai_mpc_builds_fresh_capacity_models(
+def test_build_sim_factory_mpc_builds_fresh_capacity_models(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     (mpc,) = _sim_autoscalers(
@@ -281,7 +278,7 @@ def test_build_sim_factory_cloudai_mpc_builds_fresh_capacity_models(
             tmp_path,
             autoscalers="""
             - name: mpc
-              type: cloudai_mpc_v3
+              type: mpc
               start: {prefill: 1, decode: 1}
             """,
         )
@@ -314,7 +311,7 @@ def test_build_sim_factory_cloudai_mpc_builds_fresh_capacity_models(
     assert mpc.config == config_before
 
 
-def test_build_sim_factory_cloudai_mpc_roofline_needs_no_engine_spec(
+def test_build_sim_factory_mpc_roofline_needs_no_engine_spec(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     (mpc,) = _sim_autoscalers(
@@ -323,7 +320,7 @@ def test_build_sim_factory_cloudai_mpc_roofline_needs_no_engine_spec(
             topology="agg",
             autoscalers="""
             - name: mpc-lite
-              type: cloudai_mpc_v3
+              type: mpc
               start: {decode: 1}
               config: {forward_model: roofline}
             """,
@@ -350,7 +347,7 @@ def test_lazy_exports_do_not_import_torch_until_used(monkeypatch: pytest.MonkeyP
     adapters = importlib.import_module("autoscaling_arena.adapters")
 
     for name in (
-        "CloudAIMPCV3Autoscaler",
+        "MPCAutoscaler",
         "CloudAIRLAutoscaleLSTM",
         "CloudAIRLDisaggAutoscaler",
     ):

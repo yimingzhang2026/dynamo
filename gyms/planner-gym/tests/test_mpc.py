@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CloudAI MPC v3: capacity model and control-loop contract."""
+"""MPC: capacity model and control-loop contract."""
 
 from __future__ import annotations
 
@@ -10,17 +10,17 @@ import os
 
 import pytest
 
-pytest.importorskip("numpy", reason="CloudAI adapters require numpy")
 dynamo_types = pytest.importorskip(
     "dynamo.planner.core.types",
-    reason="CloudAI adapter tests require the optional Dynamo runtime",
+    reason="MPC adapter tests require the optional Dynamo runtime",
 )
 
-from autoscaling_arena.adapters.cloudai_mpc_v3 import (  # noqa: E402
+from autoscaling_arena.adapters.mpc import (  # noqa: E402
     AISCapacityModel,
     CapacityModel,
-    CloudAIMPCV3Autoscaler,
+    MPCAutoscaler,
     RooflineCapacityModel,
+    _ArrivalForecaster,
 )
 
 # Per-worker KV capacity of the published agg substrate: 29920 blocks x 16.
@@ -117,45 +117,39 @@ def _tick(
     )
 
 
-def _v3(model: CapacityModel, **kwargs) -> CloudAIMPCV3Autoscaler:
+def _mpc(model: CapacityModel, **kwargs) -> MPCAutoscaler:
     defaults = dict(
         mode="agg",
         horizon=5,
         slo_ttft_ms=2000.0,
         slo_itl_ms=50.0,
-        violation_weight=50.0,
-        gpu_cost_per_s=100.0,
         poll_interval_s=5.0,
         scale_up_penalty=0.0,
         scale_down_penalty=0.0,
-        headroom_decay_ticks=4,
-        smoothing_alpha=0.4,
         reactive_queue_threshold=6.0,
-        reactive_rps_jump_ratio=1.8,
-        kv_pressure_threshold=0.75,
         min_replicas=1,
         max_replicas=8,
     )
     defaults.update(kwargs)
-    return CloudAIMPCV3Autoscaler(capacity_model=model, **defaults)
+    return MPCAutoscaler(capacity_model=model, **defaults)
 
 
 def test_min_stable_fleet_follows_the_capacity_model():
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS))
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS))
     mpc._isl_now, mpc._osl_ema = 8000.0, 40.0
     assert mpc._mu(5.4, 1) < 5.4  # one worker cannot sustain the load ...
     assert mpc._min_stable_fleet(5.4) >= 2  # ... so the stable fleet is larger
     assert mpc._min_stable_fleet(0.2) == 1
 
 
-def test_v3_does_not_collapse_to_one_replica_under_sustained_load():
-    """Regression for v1's 8 -> 1 drop the tick the backlog clears.
+def test_mpc_does_not_collapse_to_one_replica_under_sustained_load():
+    """Keep a sustainable fleet after the backlog clears.
 
     Constant 5.4 rps at ISL 8000 needs at least two workers under the linear
     engine (one saturated worker sustains ~4 req/s). After the fleet has drained the
-    queue, v3 must keep at least the minimum stable fleet.
+    queue, MPC must keep at least the minimum stable fleet.
     """
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS))
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS))
     decisions = []
     # Backlog phase on one worker, fleet ramps.
     for i in range(6):
@@ -182,8 +176,8 @@ def test_v3_does_not_collapse_to_one_replica_under_sustained_load():
     assert min(drained) >= 2, drained
 
 
-def test_v3_scales_to_one_when_load_is_tiny():
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS))
+def test_mpc_scales_to_one_when_load_is_tiny():
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS))
     fleet = 4
     for i in range(12):
         tick, tick_input = _tick(
@@ -194,8 +188,8 @@ def test_v3_scales_to_one_when_load_is_tiny():
 
 
 @pytest.mark.parametrize("mode", ["disagg", "agg"])
-def test_v3_decisions_stay_within_bounds(mode: str):
-    mpc = _v3(
+def test_mpc_decisions_stay_within_bounds(mode: str):
+    mpc = _mpc(
         RooflineCapacityModel(max_kv_tokens=MAX_KV_TOKENS),
         mode=mode,
         min_replicas=2,
@@ -210,9 +204,7 @@ def test_v3_decisions_stay_within_bounds(mode: str):
         decision = asyncio.run(mpc.tick(tick, tick_input)).scale_to
         assert 2 <= decision.num_decode <= 3
         if mode == "disagg":
-            assert (
-                2 <= decision.num_prefill <= 3
-            )  # pools are sized independently (point 6)
+            assert 2 <= decision.num_prefill <= 3  # pools are sized independently
         else:
             assert decision.num_prefill is None
     assert mpc.supports_ais_bootstrap is False
@@ -252,12 +244,12 @@ def test_ais_capacity_matches_observed_saturated_rates(isl, osl, rps, observed):
 
 
 # --------------------------------------------------------------------------- #
-# Point 2: order book / actuation lag
+# order book / actuation lag
 # --------------------------------------------------------------------------- #
 
 
 def test_order_book_delays_new_capacity_and_cancels_pending_first():
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
     mpc._t_s, mpc._ready, mpc._expected = 100.0, 1, 1
     assert mpc._plan_steps == 6 + 5  # ceil(30/5) + horizon
     # Ordering 3 more now: active stays 1 for the six lag steps, then 4.
@@ -282,7 +274,7 @@ def test_order_book_delays_new_capacity_and_cancels_pending_first():
 
 
 def test_reconcile_books_unknown_starting_workers_and_retires_ready_ones():
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
     mpc._reconcile_orders(10.0, ready=1, expected=3)  # started by someone else
     assert mpc.pending_orders == 2 and mpc._orders[0][0] == pytest.approx(40.0)
     mpc._reconcile_orders(45.0, ready=2, expected=3)  # one came up
@@ -290,13 +282,13 @@ def test_reconcile_books_unknown_starting_workers_and_retires_ready_ones():
 
 
 def test_queue_spike_floor_does_not_wind_up_while_orders_are_in_flight():
-    """v1 added a replica every tick of the 30 s cold start; v3 must not.
+    """Pending workers must not cause a new replica order every tick.
 
     One worker at 5.4 rps / ISL 8000 builds a backlog. After the first
     scale-up is booked, the floor stays at the in-flight fleet as long as that
     fleet clears the backlog within the plan.
     """
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
     tick, tick_input = _tick(
         0.0, rps=5.4, isl=8000, osl=40, queue=20, ready=1, expected=1
     )
@@ -319,7 +311,7 @@ def test_queue_spike_floor_does_not_wind_up_while_orders_are_in_flight():
 
 def test_queue_spike_floor_holds_in_flight_orders_that_clear_the_backlog():
     """A pending order that clears the backlog must not be cancelled next tick."""
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
     tick, tick_input = _tick(
         0.0, rps=5.4, isl=8000, osl=40, queue=20, ready=1, expected=1
     )
@@ -334,12 +326,12 @@ def test_queue_spike_floor_holds_in_flight_orders_that_clear_the_backlog():
 
 
 # --------------------------------------------------------------------------- #
-# Point 3: scale-down rule
+# scale-down rule
 # --------------------------------------------------------------------------- #
 
 
 def test_scale_down_waits_one_cold_start_and_needs_no_pending_orders():
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
     fleet = 4
     decisions = []
     for i in range(12):
@@ -354,7 +346,7 @@ def test_scale_down_waits_one_cold_start_and_needs_no_pending_orders():
 
 
 def test_scale_down_is_blocked_while_orders_are_pending():
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
     mpc._downsize_ticks = 100  # would otherwise be eligible
     tick, tick_input = _tick(
         0.0, rps=0.2, isl=500, osl=40, queue=0, ready=2, expected=4
@@ -365,7 +357,7 @@ def test_scale_down_is_blocked_while_orders_are_pending():
 
 
 def test_upper_forecast_exceeds_mean_forecast():
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS))
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS))
     for _ in range(12):
         mpc._forecaster.update(1.5 * 5.0, 5.0)
     mean, hi = mpc._forecaster.forecast(mpc._plan_steps, 5.0)
@@ -374,12 +366,12 @@ def test_upper_forecast_exceeds_mean_forecast():
 
 
 # --------------------------------------------------------------------------- #
-# Point 4: goodput-per-GPU objective
+# goodput-per-GPU objective
 # --------------------------------------------------------------------------- #
 
 
 def test_good_fraction_is_half_at_each_slo_and_one_well_inside():
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS))
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS))
     assert mpc._good_fraction(2000.0, 50.0) == pytest.approx(0.25)
     assert mpc._good_fraction(200.0, 10.0) > 0.999
     assert mpc._good_fraction(6000.0, 10.0) < 1e-6
@@ -395,7 +387,7 @@ def test_itl_under_saturation_is_prefill_plus_decode_step():
 
 
 def test_rho_tracks_goodput_per_gpu_second():
-    mpc = _v3(
+    mpc = _mpc(
         _LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS),
         rho_min=0.01,
         rho_window_s=5.0,
@@ -410,7 +402,7 @@ def test_rho_tracks_goodput_per_gpu_second():
 
 def test_ratio_objective_prefers_one_saturated_replica_over_two_idle_ones():
     """With one worker inside both SLOs, a second GPU only lowers the ratio."""
-    mpc = _v3(
+    mpc = _mpc(
         _LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS),
         scale_up_penalty=0.0,
         scale_down_penalty=0.0,
@@ -424,10 +416,8 @@ def test_ratio_objective_prefers_one_saturated_replica_over_two_idle_ones():
 
 
 # --------------------------------------------------------------------------- #
-# Point 5: arrival forecaster
+# arrival forecaster
 # --------------------------------------------------------------------------- #
-
-from autoscaling_arena.adapters.cloudai_mpc_v3 import _ArrivalForecaster  # noqa: E402
 
 
 def _feed(f: _ArrivalForecaster, rates, dt=5.0):
@@ -465,7 +455,7 @@ def test_forecaster_uses_a_trend_only_when_significant():
 
 
 # --------------------------------------------------------------------------- #
-# Point 6: disaggregated pools
+# disaggregated pools
 # --------------------------------------------------------------------------- #
 
 
@@ -503,7 +493,7 @@ def _disagg_tick(
 
 
 def test_disagg_pool_capacities_follow_their_binding_resources():
-    mpc = _v3(
+    mpc = _mpc(
         _LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS),
         mode="disagg",
         kv_transfer_gbps=100.0,
@@ -527,7 +517,7 @@ def test_disagg_pool_capacities_follow_their_binding_resources():
 
 def test_disagg_sizes_pools_independently_on_a_prefill_backlog():
     """A prefill-only backlog with idle decode must grow the prefill pool, not both."""
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), mode="disagg")
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), mode="disagg")
     # Short outputs: decode is cheap (one worker sustains hundreds of req/s), prefill of 8000
     # tokens is the bottleneck at ~4 req/s per worker.
     tick, ti = _disagg_tick(
@@ -548,7 +538,7 @@ def test_disagg_sizes_pools_independently_on_a_prefill_backlog():
 
 
 def test_disagg_scale_down_needs_the_cold_start_hold_per_pool():
-    mpc = _v3(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), mode="disagg")
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), mode="disagg")
     fleet_p, fleet_d = 4, 4
     seen = []
     for i in range(12):

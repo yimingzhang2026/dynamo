@@ -31,7 +31,7 @@ Native replay also requires compatible Dynamo bindings and AISimulate; see
 
 ## Work on planners
 
-- `src/autoscaling_arena/adapters/cloudai_mpc_v3.py`: MPC decisions.
+- `src/autoscaling_arena/adapters/mpc.py`: MPC decisions.
 - `src/autoscaling_arena/adapters/cloudai_rl_lstm.py`: aggregate RL decisions.
 - `src/autoscaling_arena/adapters/cloudai_rl_disagg.py`: disaggregate RL decisions.
 - `configs/60traces/`: the 60 static baseline configs and suite.
@@ -57,4 +57,4 @@ python -m pytest tests -q
 ```
 
 See [usage](docs/usage.md), [CloudAI adapters](docs/cloudai_autoscalers.md),
-[MPC design](docs/cloudai_mpc_v3.md), and [replay integration](docs/replay-integration.md).
+[MPC design](docs/mpc.md), and [replay integration](docs/replay-integration.md).

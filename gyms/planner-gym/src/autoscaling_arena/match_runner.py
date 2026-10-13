@@ -1764,8 +1764,8 @@ def _build_sim_factory(
             )
 
         return factory
-    if autoscaler.type == "cloudai_mpc_v3":
-        from autoscaling_arena.adapters import cloudai_mpc_v3 as mpc_v3_module
+    if autoscaler.type == "mpc":
+        from autoscaling_arena.adapters import mpc as mpc_module
 
         capacity_spec = dict(parameters.pop("forward_model"))
         capacity_type = capacity_spec.pop("type")
@@ -1778,12 +1778,12 @@ def _build_sim_factory(
                 "max_num_seqs": getattr(decode_caps, "max_num_seqs", None),
             }
             if capacity_type == "ais":
-                capacity_model = mpc_v3_module.AISCapacityModel(
+                capacity_model = mpc_module.AISCapacityModel(
                     config=capacity_spec["config"], **caps_kwargs
                 )
             else:
-                capacity_model = mpc_v3_module.RooflineCapacityModel(**caps_kwargs)
-            return mpc_v3_module.CloudAIMPCV3Autoscaler(
+                capacity_model = mpc_module.RooflineCapacityModel(**caps_kwargs)
+            return mpc_module.MPCAutoscaler(
                 capacity_model=capacity_model,
                 mode=topology,
                 capabilities=capabilities,

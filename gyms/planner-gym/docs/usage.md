@@ -524,7 +524,7 @@ For the experimental TypeSafe Jev decision engine and its five-policy synthetic
 pilot, see [the Jev guide](jev.md). It uses the same Planner engine interface
 and reports hosted-controller overhead separately from simulation metrics.
 
-The CloudAI MPC and offline-RL planners (`cloudai-mpc`, `cloudai-rl`) and the
+The MPC and offline-RL planners (`MPC`, `cloudai-rl`) and the
 configuration requirements are described in
 [the CloudAI autoscalers guide](cloudai_autoscalers.md). Use the static 60-case
 suite as the reference before enabling these planners.
