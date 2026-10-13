@@ -478,6 +478,21 @@ def test_static_window_idle_tail_uses_same_duration_for_rate_and_gpu_average():
     assert result["profiles"]["interactive"]["goodput_per_gpu"] == pytest.approx(3 / 20)
 
 
+def test_dynamic_hold_final_tail_is_explicit_in_scorecard():
+    result = scorecard(
+        _window_report(),
+        profiles=(INTERACTIVE,),
+        measurement_window=MeasurementWindow(0, 10, idle_tail_policy="hold_final"),
+        allocation=AllocationConfig({"agg": 1}, {"agg": 2}),
+        request_records=iter(_window_records()),
+    )
+    assert result["duration_s"] == 10
+    assert result["replay_duration_s"] == 8
+    assert result["gpu_hours"] == pytest.approx(20 / 3600)
+    assert result["measurement"]["idle_tail_policy"] == "hold_final"
+    assert result["measurement"]["idle_tail_s"] == 2
+
+
 def test_zero_output_e2e_only_capture_matches_native_summary():
     report = _summary_report()
     report.trace_report.update(

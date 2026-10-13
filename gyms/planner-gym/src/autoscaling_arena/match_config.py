@@ -476,7 +476,7 @@ class EvaluationConfig:
     prepare: Optional[dict[str, Any]] = None
     warmup_path: Optional[Path] = None
     warmup_prepare: Optional[dict[str, Any]] = None
-    measurement_window: Optional[dict[str, float]] = None
+    measurement_window: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -541,7 +541,7 @@ class MatchRun:
     prepare: Optional[dict[str, Any]] = None
     warmup_path: Optional[Path] = None
     warmup_prepare: Optional[dict[str, Any]] = None
-    measurement_window: Optional[dict[str, float]] = None
+    measurement_window: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -1376,7 +1376,8 @@ def _parse_sim_autoscaler(
             "static": _STATIC_CONFIG_KEYS,
             "reactive": _REACTIVE_CONFIG_KEYS,
             "keda": _KEDA_CONFIG_KEYS,
-            "jev": frozenset(_JEV_DEFAULTS),
+            "jev": frozenset(_JEV_DEFAULTS)
+            | {"prior_calls", "replay_decisions", "replay_decisions_sha256"},
             "mpc": _MPC_CONFIG_KEYS
             | {
                 "cold_start_s",
@@ -1421,6 +1422,13 @@ def _parse_sim_autoscaler(
         _validate_adapter_values(
             adapter_config, path=f"{path}.config", autoscaler_type=autoscaler_type
         )
+        if autoscaler_type == "jev" and "replay_decisions" in adapter_config:
+            replay_path = _resolve_path(adapter_config["replay_decisions"], base_dir)
+            if not replay_path.is_file():
+                raise MatchConfigError(
+                    f"{path}.config.replay_decisions: file does not exist"
+                )
+            adapter_config["replay_decisions"] = str(replay_path)
         if autoscaler_type in _CLOUDAI_TYPES:
             _resolve_cloudai_config(
                 adapter_config,
@@ -1791,6 +1799,22 @@ def _validate_adapter_values(
         elif key == "checkpoint_path":
             _string(value, key_path)
     if autoscaler_type == "jev":
+        prior_calls = _integer(
+            config.get("prior_calls", 0), f"{path}.prior_calls", nonnegative=True
+        )
+        if prior_calls > config["max_calls"]:
+            raise MatchConfigError(f"{path}.prior_calls: exceeds max_calls")
+        if ("replay_decisions" in config) != ("replay_decisions_sha256" in config):
+            raise MatchConfigError(f"{path}: replay_decisions requires its SHA-256")
+        if "replay_decisions" in config:
+            _string(config["replay_decisions"], f"{path}.replay_decisions")
+            digest = _string(
+                config["replay_decisions_sha256"], f"{path}.replay_decisions_sha256"
+            )
+            if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                raise MatchConfigError(
+                    f"{path}.replay_decisions_sha256: expected SHA-256"
+                )
         if "model" in config:
             _string(config["model"], f"{path}.model")
         failure_mode = _string(
@@ -2371,7 +2395,11 @@ def _parse_evaluation_options(
             out["measurement_window"] = None
             return out
         window = _mapping(data["measurement_window"], f"{path}.measurement_window")
-        _only_keys(window, {"start_s", "end_s"}, f"{path}.measurement_window")
+        _only_keys(
+            window,
+            {"start_s", "end_s", "idle_tail_policy"},
+            f"{path}.measurement_window",
+        )
         start = _number(
             window.get("start_s", 0.0),
             f"{path}.measurement_window.start_s",
@@ -2387,6 +2415,16 @@ def _parse_evaluation_options(
                 f"{path}.measurement_window: end_s must exceed start_s"
             )
         out["measurement_window"] = {"start_s": start, "end_s": end}
+        if "idle_tail_policy" in window:
+            policy = _string(
+                window["idle_tail_policy"],
+                f"{path}.measurement_window.idle_tail_policy",
+            )
+            if policy not in {"reject", "hold_final"}:
+                raise MatchConfigError(
+                    f"{path}.measurement_window.idle_tail_policy: expected reject or hold_final"
+                )
+            out["measurement_window"]["idle_tail_policy"] = policy
     return out
 
 

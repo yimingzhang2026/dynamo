@@ -4,6 +4,7 @@
 """Exercise the real HTTP boundary with local responses, never a hosted model."""
 
 import asyncio
+import hashlib
 import importlib
 import json
 
@@ -15,6 +16,9 @@ httpx = pytest.importorskip("httpx")
 TickInput = planner_types.TickInput
 WorkerCounts = planner_types.WorkerCounts
 JevAutoscaler = importlib.import_module("autoscaling_arena.adapters.jev").JevAutoscaler
+validate_answer = importlib.import_module(
+    "autoscaling_arena.adapters.jev"
+)._validate_answer
 
 
 def snapshot(at=15):
@@ -209,3 +213,149 @@ def test_missing_key_fails_before_http_client_creation(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     with pytest.raises(ValueError, match="TYPESAFE_API_KEY"):
         JevAutoscaler()
+
+
+@pytest.mark.parametrize(
+    "probabilities",
+    [
+        {"3": 0.05, "4": 0.93, "5": 0.01},
+        {"3": 0.06, "4": 0.94, "5": 0.01},
+    ],
+)
+def test_hosted_rounded_probabilities_preserve_model_choice(tmp_path, probabilities):
+    def handler(request):
+        result = response_for(json.loads(request.content))
+        result["answers"]["decode"]["probabilities"] = probabilities
+        return httpx.Response(200, json=result)
+
+    engine = make_engine(tmp_path, handler)
+
+    async def run():
+        try:
+            result = await engine.tick(engine.initial_tick(15), snapshot())
+            assert result.scale_to.num_decode == 4
+        finally:
+            await engine.shutdown()
+
+    asyncio.run(run())
+    row = json.loads((tmp_path / "decisions.jsonl").read_text())
+    assert row["status"] == "ok"
+    assert row["answers"]["decode"]["probabilities"] == probabilities
+
+
+@pytest.mark.parametrize(
+    "probabilities",
+    [
+        {"3": 0.05, "4": 0.91, "5": 0.01},
+        {"3": 0.07, "4": 0.95, "5": 0.01},
+        {"3": 0.051, "4": 0.93, "5": 0.01},
+        {"3": -0.01, "4": 1, "5": 0.01},
+    ],
+)
+def test_rounding_tolerance_does_not_accept_invalid_distributions(probabilities):
+    with pytest.raises(ValueError):
+        validate_answer(
+            {
+                "type": "choice",
+                "choice": "4",
+                "confidence": 0.9,
+                "probabilities": probabilities,
+            },
+            {"3": {}, "4": {}, "5": {}},
+        )
+
+
+def test_recovery_reuses_exact_decisions_and_enforces_remaining_api_budget(tmp_path):
+    original = tmp_path / "original"
+    original.mkdir()
+    recovery = tmp_path / "recovery"
+    recovery.mkdir()
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=response_for(requests[-1]))
+
+    first = make_engine(original, handler)
+
+    async def initial():
+        try:
+            for at in (15, 30):
+                await first.tick(first.initial_tick(at), snapshot(at))
+        finally:
+            await first.shutdown()
+
+    asyncio.run(initial())
+    source = original / "decisions.jsonl"
+    engine = make_engine(
+        recovery,
+        handler,
+        prior_calls=3,
+        max_calls=4,
+        replay_decisions=str(source),
+        replay_decisions_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+
+    async def recover():
+        try:
+            for at in (15, 30, 45):
+                result = await engine.tick(engine.initial_tick(at), snapshot(at))
+                assert result.scale_to.num_decode == 4
+            with pytest.raises(RuntimeError, match="max_calls exhausted"):
+                await engine.tick(engine.initial_tick(60), snapshot(60))
+        finally:
+            await engine.shutdown()
+
+    asyncio.run(recover())
+    assert len(requests) == 3  # Two original calls, then one new call.
+    summary = summarize_decisions(recovery / "decisions.jsonl")
+    assert summary["calls"] == 1
+    assert summary["replayed_decisions"] == 2
+    assert summary["reported_input_tokens"] == 300
+    rows = [
+        json.loads(line)
+        for line in (recovery / "decisions.jsonl").read_text().splitlines()
+    ]
+    assert [row["api_calls_used"] for row in rows] == [3, 3, 4]
+
+
+@pytest.mark.parametrize("fault", ["checksum", "request"])
+def test_recovery_refuses_changed_log_or_observations(tmp_path, fault):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=response_for(json.loads(request.content)))
+
+    first = make_engine(tmp_path, handler)
+
+    async def initial():
+        try:
+            await first.tick(first.initial_tick(15), snapshot())
+        finally:
+            await first.shutdown()
+
+    asyncio.run(initial())
+    source = tmp_path / "decisions.jsonl"
+    checksum = hashlib.sha256(source.read_bytes()).hexdigest()
+    recovery = tmp_path / "recovery"
+    recovery.mkdir()
+    kwargs = dict(
+        prior_calls=1, replay_decisions=str(source), replay_decisions_sha256=checksum
+    )
+    if fault == "checksum":
+        source.write_text(source.read_text() + "\n")
+        with pytest.raises(ValueError, match="checksum mismatch"):
+            JevAutoscaler(**kwargs)
+    else:
+        engine = make_engine(recovery, handler, **kwargs)
+
+        async def recover():
+            try:
+                with pytest.raises(ValueError, match="request differs"):
+                    await engine.tick(engine.initial_tick(16), snapshot(16))
+            finally:
+                await engine.shutdown()
+
+        asyncio.run(recover())
+    assert len(requests) == 1

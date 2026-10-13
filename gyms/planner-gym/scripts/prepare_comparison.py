@@ -130,10 +130,22 @@ def schedule_batches(
 
 
 def make_config(
-    base: dict, job: dict, policy: dict, config_path: Path, output: Path
+    base: dict,
+    job: dict,
+    policy: dict,
+    config_path: Path,
+    output: Path,
+    *,
+    jev_recovery: dict | None = None,
 ) -> dict:
     """Preserve the static case's input/SLO/start and add the chosen dynamic policy."""
     config = copy.deepcopy(base)
+    # Preserve the static baseline's complete offered window even when every
+    # request finishes early. Charge the final fleet during the unused tail;
+    # do not shorten the window or fabricate post-replay controller decisions.
+    config["evaluations"]["defaults"]["measurement_window"][
+        "idle_tail_policy"
+    ] = "hold_final"
     backend = config["backend"]
     disagg = backend["topology"] == "disagg"
     limits = policy["worker_limits"]
@@ -173,6 +185,8 @@ def make_config(
             max_calls=policy["jev"]["max_calls"],
             poll_interval_s=policy["jev"]["poll_interval_s"],
         )
+        if jev_recovery is not None:
+            parameters.update(jev_recovery)
     if planner == "mpc":
         profile = config["slo_profiles"][0]
         parameters = {

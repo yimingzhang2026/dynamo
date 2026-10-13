@@ -56,12 +56,23 @@ def _validate_answer(answer: Any, options: dict[str, Any]) -> None:
         not isinstance(probabilities, dict)
         or set(probabilities) != set(options)
         or not all(_probability(p) for p in probabilities.values())
-        or not math.isclose(sum(probabilities.values()), 1, abs_tol=1e-3)
         or not _probability(answer.get("confidence"))
         or not isinstance(answer.get("choice"), str)
         or answer["choice"] not in options
     ):
         raise ValueError("invalid Choice distribution or selection")
+    # Hosted Jev can round each probability to two decimal places (e.g.
+    # 0.05 + 0.93 + 0.01). Allow only the resulting quantization error;
+    # retain the reported distribution and chosen action without renormalizing.
+    rounded = all(
+        math.isclose(p, round(p, 2), rel_tol=0, abs_tol=1e-12)
+        for p in probabilities.values()
+    )
+    tolerance = len(probabilities) * 0.005 + 1e-12 if rounded else 1e-3
+    if not math.isclose(
+        math.fsum(probabilities.values()), 1, rel_tol=0, abs_tol=tolerance
+    ):
+        raise ValueError("Choice probability mass exceeds rounding tolerance")
     if probabilities[answer["choice"]] < max(probabilities.values()):
         raise ValueError("Choice selection is not a highest-probability option")
 
@@ -90,6 +101,9 @@ class JevAutoscaler(_NoopRegressionBootstrap):
         min_confidence: float = 0,
         history_ticks: int = 4,
         max_calls: int = 600,
+        prior_calls: int = 0,
+        replay_decisions: str | None = None,
+        replay_decisions_sha256: str | None = None,
         failure_mode: str = "raise",
         decision_log: Path | None = None,
         context: dict[str, Any] | None = None,
@@ -119,6 +133,22 @@ class JevAutoscaler(_NoopRegressionBootstrap):
             raise ValueError("invalid confidence threshold or failure mode")
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be nonempty")
+        if type(prior_calls) is not int or not 0 <= prior_calls <= max_calls:
+            raise ValueError("prior_calls must be an integer within the call budget")
+        self._replay: deque[dict[str, Any]] = deque()
+        if replay_decisions is not None:
+            content = Path(replay_decisions).read_bytes()
+            if hashlib.sha256(content).hexdigest() != replay_decisions_sha256:
+                raise ValueError("Jev replay decision log checksum mismatch")
+            for line in content.splitlines():
+                row = json.loads(line)
+                if row["status"] != "ok":
+                    break
+                self._replay.append(row)
+            if len(self._replay) > prior_calls:
+                raise ValueError("prior_calls must include the recorded decisions")
+        elif replay_decisions_sha256 is not None:
+            raise ValueError("replay_decisions_sha256 requires replay_decisions")
         if client is None:
             key = os.environ.get("TYPESAFE_API_KEY", "").strip()
             if not key:
@@ -143,7 +173,7 @@ class JevAutoscaler(_NoopRegressionBootstrap):
         self._confidence = min_confidence
         self._history: deque[dict[str, Any]] = deque(maxlen=history_ticks)
         self._max_calls = max_calls
-        self._calls = 0
+        self._calls = prior_calls
         self._failure_mode = failure_mode
         self._context = context or {}
         self._log = decision_log.open("x", encoding="utf-8") if decision_log else None
@@ -198,7 +228,7 @@ class JevAutoscaler(_NoopRegressionBootstrap):
     async def tick(
         self, scheduled_tick: ScheduledTick, tick_input: TickInput
     ) -> PlannerEffects:
-        if self._calls >= self._max_calls:
+        if self._calls >= self._max_calls and not self._replay:
             raise RuntimeError(
                 "Jev max_calls exhausted; increase the explicit run budget"
             )
@@ -265,7 +295,10 @@ class JevAutoscaler(_NoopRegressionBootstrap):
         }
         target = dict(current)
         started = time.perf_counter()
-        self._calls += 1
+        cached = self._replay.popleft() if self._replay else None
+        if cached is not None and cached["request_sha256"] != record["request_sha256"]:
+            raise ValueError("Jev replay request differs; refusing to reuse a decision")
+        record["response_source"] = "replay" if cached is not None else "api"
         failure = None
         stage = "http_or_json"
         try:
@@ -275,7 +308,11 @@ class JevAutoscaler(_NoopRegressionBootstrap):
                 response.raise_for_status()
                 return response.json()
 
-            result = await asyncio.wait_for(evaluate(), timeout=self._timeout)
+            if cached is None:
+                self._calls += 1
+                result = await asyncio.wait_for(evaluate(), timeout=self._timeout)
+            else:
+                result = {key: cached.get(key) for key in ("model", "answers", "usage")}
             stage = "model"
             if not isinstance(result, dict) or not isinstance(result.get("model"), str):
                 raise TypeError("missing response model")
@@ -309,9 +346,22 @@ class JevAutoscaler(_NoopRegressionBootstrap):
             # include credentials. A failed call leaves the whole fleet intact.
             failure = type(exc).__name__
             record.update(status="error", error_type=failure, error_stage=stage)
+            if stage.startswith("choice_"):
+                answer = answers[stage.removeprefix("choice_")]
+                probabilities = (
+                    answer.get("probabilities") if isinstance(answer, dict) else None
+                )
+                if isinstance(probabilities, dict) and all(
+                    _probability(value) for value in probabilities.values()
+                ):
+                    record["probability_sum"] = math.fsum(probabilities.values())
             target = dict(current)
         finally:
-            record.update(wall_latency_s=time.perf_counter() - started, targets=target)
+            record.update(
+                wall_latency_s=time.perf_counter() - started,
+                targets=target,
+                api_calls_used=self._calls,
+            )
             if self._log:
                 self._log.write(json.dumps(record, allow_nan=False) + "\n")
                 self._log.flush()

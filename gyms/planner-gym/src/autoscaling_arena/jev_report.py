@@ -9,18 +9,21 @@ from pathlib import Path
 
 
 def summarize_decisions(path: Path) -> dict:
-    calls = errors = gated = input_tokens = missing_usage = 0
+    calls = errors = gated = input_tokens = missing_usage = replayed = 0
     models = set()
     latencies = []
     with path.open(encoding="utf-8") as stream:
         for line in stream:
             row = json.loads(line)
-            calls += 1
             errors += row["status"] == "error"
             gated += bool(row["gated_pools"])
-            latencies.append(row["wall_latency_s"])
             if row.get("model"):
                 models.add(row["model"])
+            if row.get("response_source") == "replay":
+                replayed += 1
+                continue
+            calls += 1
+            latencies.append(row["wall_latency_s"])
             tokens = (row.get("usage") or {}).get("input_tokens")
             if type(tokens) is int and tokens >= 0:
                 input_tokens += tokens
@@ -29,6 +32,7 @@ def summarize_decisions(path: Path) -> dict:
     latencies.sort()
     return {
         "calls": calls,
+        "replayed_decisions": replayed,
         "errors": errors,
         "confidence_gated_ticks": gated,
         "models": sorted(models),

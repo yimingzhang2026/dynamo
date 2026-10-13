@@ -17,10 +17,13 @@ class MeasurementWindow:
 
     All eventual outcomes of arrivals in this interval are scored, including
     completions during drain. Rates and GPU-hours use this same interval.
+    ``hold_final`` charges the last fleet after replay ends without simulating
+    additional controller decisions; the default rejects an unobserved tail.
     """
 
     start_s: float
     end_s: float
+    idle_tail_policy: str = "reject"
 
     def __post_init__(self) -> None:
         if (
@@ -30,6 +33,8 @@ class MeasurementWindow:
             or self.end_s <= self.start_s
         ):
             raise ValueError("measurement window requires 0 <= start_s < end_s")
+        if self.idle_tail_policy not in {"reject", "hold_final"}:
+            raise ValueError("idle_tail_policy must be reject or hold_final")
 
     @property
     def duration_s(self) -> float:
@@ -78,10 +83,15 @@ def window_gpu_hours(
 
     Starting and draining workers consume GPUs until removed, just as in native
     replay. Controller decisions after replay termination are unknown; a dynamic
-    window cannot extend past that point. Fixed allocation may explicitly retain
-    its fleet through an idle tail. Lifecycle timestamps must use the replay clock.
+    window requires an explicit hold_final convention to extend past that point.
+    Fixed allocation may explicitly retain its fleet through an idle tail.
+    Lifecycle timestamps must use the replay clock.
     """
-    if window.end_s > replay_duration_s and not allocation.allow_idle_tail:
+    if (
+        window.end_s > replay_duration_s
+        and not allocation.allow_idle_tail
+        and window.idle_tail_policy != "hold_final"
+    ):
         raise ValueError(
             "measurement window ends after replay; dynamic allocation "
             "cannot be extrapolated into an unobserved idle tail"
@@ -89,6 +99,9 @@ def window_gpu_hours(
     events = sorted(
         operations, key=lambda row: (row["at_ms"], row["operation_ordinal"])
     )
+    # hold_final explicitly stops the controller at replay completion and
+    # charges its last provisioned fleet through the offered window. It does
+    # not invent further decisions or claim the idle tail was simulated.
     counts = dict(allocation.initial_workers)
     previous_s = 0.0
     gpu_seconds = 0.0

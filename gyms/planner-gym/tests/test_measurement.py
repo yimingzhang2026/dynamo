@@ -81,6 +81,17 @@ def test_dynamic_window_cannot_extrapolate_past_replay():
         )
 
 
+def test_explicit_hold_final_accounts_for_full_window_after_last_completion():
+    operations = [_operation(2, 0, active=(0, 1))]
+    actual = window_gpu_hours(
+        operations,
+        AllocationConfig({"agg": 1}, {"agg": 4}),
+        MeasurementWindow(0, 10, idle_tail_policy="hold_final"),
+        replay_duration_s=8,
+    )
+    assert actual == pytest.approx((2 + 2 * 8) * 4 / 3600)
+
+
 def test_idle_tail_is_not_permitted_for_changing_allocation():
     with pytest.raises(ValueError, match="fixed worker allocation"):
         window_gpu_hours(

@@ -319,6 +319,16 @@ def scorecard(
             if measurement_window
             else "native_replay",
             "allow_idle_tail": bool(measurement_window and allocation.allow_idle_tail),
+            "idle_tail_policy": (
+                "fixed"
+                if allocation and allocation.allow_idle_tail
+                else measurement_window.idle_tail_policy
+                if measurement_window
+                else "reject"
+            ),
+            "idle_tail_s": max(0.0, measurement_window.end_s - replay_duration_s)
+            if measurement_window
+            else 0.0,
         },
         "completed_requests": completed,
         "attempted_requests": attempted,
