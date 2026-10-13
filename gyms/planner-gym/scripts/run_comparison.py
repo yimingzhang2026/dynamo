@@ -136,6 +136,130 @@ def validate_plan(plan: dict, directory: Path) -> None:
             raise ValueError(f"{job['id']}: config changed; regenerate the plan")
 
 
+def choose_rolling_job(
+    pending: list[dict], active: list[dict], policy: dict, available_gib: float
+) -> dict | None:
+    """Prefer small, different cases while enforcing all concurrent resource limits."""
+    active_cases = {job["case_id"] for job in active}
+    candidates = sorted(
+        pending,
+        key=lambda job: (
+            job["exclusive"],
+            job["memory_gib"],
+            job["case_id"] in active_cases,
+            job["duration_s"],
+            job["id"],
+        ),
+    )
+    for job in candidates:
+        combined = [*active, job]
+        if (
+            len(combined) > policy["max_parallel_runs"]
+            or sum(j["cores"] for j in combined)
+            > policy["physical_cores"] - policy["reserve_cores"]
+            or sum(j["memory_gib"] for j in combined)
+            > policy["memory_gib"] - policy["reserve_memory_gib"]
+            or sum(j["planner"] == "jev" for j in combined) > policy["max_parallel_jev"]
+            or (len(combined) > 1 and any(j["exclusive"] for j in combined))
+            or job["memory_gib"] + policy["reserve_memory_gib"] > available_gib
+        ):
+            continue
+        return job
+    return None
+
+
+def execute_rolling(
+    jobs: dict,
+    status: dict,
+    policy: dict,
+    directory: Path,
+    cpus: list[int],
+    taskset: str,
+    environment: dict,
+    save_status,
+    planners: set[str] | None,
+    keep_going: bool,
+) -> int:
+    """Refill individual CPU slots without waiting for an entire batch to finish."""
+    pending = [
+        jobs[job_id]
+        for job_id, state in status["jobs"].items()
+        if state == "pending"
+        and (planners is None or jobs[job_id]["planner"] in planners)
+    ]
+    active = {}
+    halt = False
+    with ExitStack() as cleanup:
+        while pending or active:
+            for job_id, (job, process, allocated, resources) in list(active.items()):
+                code = process.poll()
+                if code is None:
+                    continue
+                status["jobs"][job_id] = "completed" if code == 0 else "failed"
+                save_status()
+                resources.close()
+                del active[job_id]
+                print(f"Finished {job_id}: {status['jobs'][job_id]}", flush=True)
+                if code != 0 and not keep_going:
+                    halt = True
+            if not halt:
+                while pending:
+                    job = choose_rolling_job(
+                        pending,
+                        [item[0] for item in active.values()],
+                        policy,
+                        memory_capacity()[1],
+                    )
+                    if job is None:
+                        break
+                    used = {cpu for item in active.values() for cpu in item[2]}
+                    allocated = [cpu for cpu in cpus if cpu not in used][: job["cores"]]
+                    resources = cleanup.enter_context(ExitStack())
+                    log = resources.enter_context(
+                        (directory / "logs" / f"{job['id']}.log").open("x")
+                    )
+                    command = [
+                        taskset,
+                        "--cpu-list",
+                        ",".join(map(str, allocated)),
+                        sys.executable,
+                        str(ROOT / "scripts/run_match_config.py"),
+                        str(directory / job["config"]),
+                        "--session-dir",
+                        str(directory / job["session"]),
+                        "--expect-trace-sha256",
+                        job["trace_sha256"],
+                    ]
+                    process = subprocess.Popen(
+                        command,
+                        cwd=ROOT,
+                        env=environment,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                    resources.callback(stop_process, process)
+                    active[job["id"]] = (job, process, allocated, resources)
+                    pending = [item for item in pending if item["id"] != job["id"]]
+                    status["jobs"][job["id"]] = "running"
+                    save_status()
+                    print(
+                        f"Started {job['id']} on CPUs {allocated}; "
+                        f"{len(active)}/{policy['max_parallel_runs']} active",
+                        flush=True,
+                    )
+            if not active:
+                if halt:
+                    break
+                if pending:
+                    raise RuntimeError(
+                        "no pending job fits the available memory including host reserve"
+                    )
+            if active:
+                time.sleep(0.25)
+    return int("failed" in status["jobs"].values())
+
+
 def execute(
     plan: dict,
     directory: Path,
@@ -144,6 +268,7 @@ def execute(
     resume_pending: bool = False,
     planners: set[str] | None = None,
     keep_going: bool = False,
+    rolling: bool = False,
 ) -> int:
     if sys.platform != "linux":
         raise RuntimeError("this execution setup requires a Linux native-replay host")
@@ -206,6 +331,19 @@ def execute(
         temporary.replace(directory / "status.json")
 
     save_status()
+    if rolling:
+        return execute_rolling(
+            jobs,
+            status,
+            policy,
+            directory,
+            cpus[: policy["physical_cores"] - policy["reserve_cores"]],
+            taskset,
+            environment,
+            save_status,
+            planners,
+            keep_going,
+        )
     for index, batch_ids in enumerate(plan["batches"], 1):
         batch = [
             jobs[job_id]
@@ -283,6 +421,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("plan", type=Path)
     parser.add_argument(
+        "--rolling",
+        action="store_true",
+        help="prioritize small cases and refill free slots as each run finishes",
+    )
+    parser.add_argument(
         "--wait-for-lock",
         action="store_true",
         help="wait for the active launcher to finish before resuming a selected queue",
@@ -337,6 +480,7 @@ def main() -> int:
             resume_pending=args.resume_pending,
             planners=set(args.planners) if args.planners else None,
             keep_going=args.keep_going,
+            rolling=args.rolling,
         )
 
 

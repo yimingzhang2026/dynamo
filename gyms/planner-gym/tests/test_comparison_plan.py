@@ -246,8 +246,9 @@ def test_container_limits_override_vm_resources(tmp_path, monkeypatch):
     assert run.cpu_capacity(list(range(18)), tmp_path) == 18
 
 
+@pytest.mark.parametrize("rolling", [False, True])
 def test_resume_runs_only_pending_selected_planners_and_keeps_failures(
-    campaign, tmp_path, monkeypatch
+    campaign, tmp_path, monkeypatch, rolling
 ):
     jobs, policy = campaign
     selected = [
@@ -288,6 +289,7 @@ def test_resume_runs_only_pending_selected_planners_and_keeps_failures(
             resume_pending=True,
             planners={"mpc", "planner", "keda", "reactive"},
             keep_going=True,
+            rolling=rolling,
         )
         == 1
     )
@@ -305,6 +307,7 @@ def test_resume_runs_only_pending_selected_planners_and_keeps_failures(
             resume_pending=True,
             planners={"mpc", "planner", "keda", "reactive"},
             keep_going=True,
+            rolling=rolling,
         )
         == 1
     )
@@ -327,3 +330,97 @@ def test_oversized_cases_remain_pending_when_partial_execution_is_explicit(
     assert json.loads((tmp_path / "status.json").read_text())["pending_resources"] == [
         "large-case"
     ]
+
+
+def test_rolling_selection_enforces_reservations_and_prefers_other_cases(campaign):
+    jobs, policy = campaign
+    parallel = {
+        **policy["parallel"],
+        "physical_cores": 6,
+        "reserve_cores": 0,
+        "memory_gib": 28,
+        "reserve_memory_gib": 2,
+        "max_parallel_runs": 3,
+    }
+    base = dict(jobs[0], memory_gib=8, cores=2, exclusive=False)
+    active = dict(base, id="active", case_id="case-a", planner="jev")
+    same = dict(base, id="same", case_id="case-a")
+    other = dict(base, id="other", case_id="case-b")
+    another_jev = dict(other, id="jev", planner="jev")
+    large = dict(other, id="large", memory_gib=26, exclusive=True)
+    assert run.choose_rolling_job([same, other], [active], parallel, 20) == other
+    assert run.choose_rolling_job([another_jev, large], [active], parallel, 20) is None
+    assert run.choose_rolling_job([other], [active, same, base], parallel, 20) is None
+    assert run.choose_rolling_job([other], [large], parallel, 20) is None
+    assert run.choose_rolling_job([other], [], parallel, 9) is None
+    assert run.choose_rolling_job([large], [], parallel, 30) == large
+    crowded = [dict(active, memory_gib=19)]
+    assert run.choose_rolling_job([other], crowded, parallel, 20) is None
+
+
+@pytest.mark.timeout(10)
+def test_rolling_refills_a_finished_slot_before_other_jobs_finish(
+    campaign, tmp_path, monkeypatch
+):
+    jobs, policy = campaign
+    policy = {
+        **policy,
+        "parallel": {
+            **policy["parallel"],
+            "physical_cores": 6,
+            "reserve_cores": 0,
+            "memory_gib": 28,
+            "reserve_memory_gib": 2,
+            "max_parallel_runs": 3,
+        },
+    }
+    selected = [
+        dict(
+            jobs[0],
+            id=name,
+            case_id=name,
+            memory_gib=8,
+            cores=2,
+            exclusive=False,
+            config=f"{name}.yaml",
+            session=f"sessions/{name}",
+        )
+        for name in ("a", "b", "c", "d")
+    ]
+    plan = {
+        "jobs": selected,
+        "policy": policy,
+        "batches": [[job["id"]] for job in selected],
+        "blocked_jobs": [],
+    }
+    monkeypatch.setattr(run.sys, "platform", "linux")
+    monkeypatch.setattr(run, "physical_cpu_ids", lambda: list(range(6)))
+    monkeypatch.setattr(run, "cpu_capacity", lambda cpus: len(cpus))
+    monkeypatch.setattr(run, "memory_capacity", lambda: (30, 28))
+    monkeypatch.setattr(run.shutil, "which", lambda name: "/usr/bin/taskset")
+    clock = [0]
+    launches = []
+
+    def advance(_):
+        clock[0] += 1
+
+    def launch(command, **kwargs):
+        name = Path(command[5]).stem
+        launches.append((name, clock[0], command[2]))
+        finish = clock[0] + {"a": 3, "b": 1, "c": 2, "d": 1}[name]
+        return SimpleNamespace(
+            returncode=0, poll=lambda: 0 if clock[0] >= finish else None
+        )
+
+    monkeypatch.setattr(run.time, "sleep", advance)
+    monkeypatch.setattr(run.subprocess, "Popen", launch)
+    assert run.execute(plan, tmp_path, rolling=True) == 0
+    assert launches == [
+        ("a", 0, "0,1"),
+        ("b", 0, "2,3"),
+        ("c", 0, "4,5"),
+        ("d", 1, "2,3"),
+    ]
+    assert set(json.loads((tmp_path / "status.json").read_text())["jobs"].values()) == {
+        "completed"
+    }
