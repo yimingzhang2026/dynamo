@@ -44,7 +44,11 @@ def suite_files(tmp_path: Path) -> tuple[Path, dict]:
                 }
             ],
         },
-        "evaluations": {"workloads": ["flat"]},
+        "evaluations": {
+            "traces": [
+                {"name": "case-input", "path": "unit-trace.jsonl", "block_size": 512}
+            ]
+        },
         "slo_profiles": [{"name": "interactive", "ttft_ms": 200, "itl_ms": 20}],
         "publish": {
             "artifact_root": "artifacts",
@@ -53,6 +57,9 @@ def suite_files(tmp_path: Path) -> tuple[Path, dict]:
     }
     child = tmp_path / "configs"
     child.mkdir()
+    (child / "unit-trace.jsonl").write_text(
+        '{"timestamp":0,"input_length":512,"output_length":8,"hash_ids":[1]}\n'
+    )
     (child / "first.json").write_text(json.dumps(config))
     second = copy.deepcopy(config)
     second["backend"]["topology"] = "agg"

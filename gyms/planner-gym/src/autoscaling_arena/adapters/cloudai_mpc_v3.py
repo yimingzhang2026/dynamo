@@ -17,10 +17,7 @@ processor shared between prefill and decode::
 
 Capacity is evaluated at saturation (a backlog holds concurrency at the KV
 cap, where decode batching is best); the current load's concurrency only
-enters the ITL estimate. Against the published agg runs this reproduces the
-saturated per-worker completion rate within ~20% on the prefill-bound
-synthetic traces and on the decode/KV-bound Golden Set traces. A
-multiplicative bias learned from completions during saturated ticks absorbs
+enters the ITL estimate. A multiplicative bias learned from completions during saturated ticks absorbs
 the remaining scheduler effects.
 
 Point 2 (actuation lag). A replica ordered at ``t`` serves from
@@ -45,7 +42,7 @@ paths that bypassed the candidate cost — a short-circuit before the optimizer,
 an eager scale-down after it and a scheduled scale-down — plus an adaptive GPU
 cost (``2**headroom``), an RPS-jump floor and an oscillation hold. With an
 honest plant model those paths flipped the fleet between one and two replicas
-on 5 s noise (200-360 scale events per hour on the Golden Set). v3 deletes
+on 5 s noise. v3 deletes
 them. The only floor left is the lag-aware queue-spike floor. Scale-down is
 governed by the asymmetry of being wrong: undoing a wrong scale-down costs a
 full cold start of SLO misses, undoing a wrong hold costs one GPU for one tick.

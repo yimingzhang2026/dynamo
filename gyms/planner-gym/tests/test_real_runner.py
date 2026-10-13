@@ -54,7 +54,7 @@ def test_committed_endpoint_example_loads():
 def test_failed_endpoint_without_summary_still_renders():
     failure = EndpointMatchResult(
         endpoint="failed",
-        workload="flat",
+        workload="unit-a",
         profile="interactive",
         metrics={},
         returncode=1,
@@ -62,7 +62,7 @@ def test_failed_endpoint_without_summary_still_renders():
     )
     completed = EndpointMatchResult(
         endpoint="completed",
-        workload="flat",
+        workload="unit-a",
         profile="interactive",
         metrics={"goodput_rps": 0.0, "mean_ttft_ms": 100.0},
         returncode=0,
@@ -202,7 +202,7 @@ def test_endpoint_cli_rejects_unknown_profiles_before_loading_endpoints(
 def test_endpoint_cli_saves_completed_and_failed_matches(tmp_path, monkeypatch):
     from autoscaling_arena import workloads
     from autoscaling_arena.runners import real
-    from autoscaling_arena.workloads.axes import NoSharing, flat
+    from autoscaling_arena.workloads.axes import NoSharing
 
     script = Path(__file__).resolve().parents[1] / "scripts/run_endpoint_bench.py"
     main = runpy.run_path(str(script))["main"]
@@ -221,7 +221,7 @@ def test_endpoint_cli_saves_completed_and_failed_matches(tmp_path, monkeypatch):
         description="test",
         block_size=16,
         duration_s=1,
-        arrival=flat(20),
+        arrival=lambda t: 20,
         shape=lambda rng: (32, 2),
         prefix_factory=NoSharing,
     )

@@ -1,0 +1,246 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+name: static-baseline-60
+cases:
+- id: A-HT-S01
+  config: A-HT-S01.yaml
+  labels:
+    dataset: ragpulse
+- id: A-HT-S02
+  config: A-HT-S02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: A-HT-S03
+  config: A-HT-S03.yaml
+  labels:
+    dataset: azure-2024-conv
+- id: A-HT-S04
+  config: A-HT-S04.yaml
+  labels:
+    dataset: burstgpt-3
+- id: A-HT-S05
+  config: A-HT-S05.yaml
+  labels:
+    dataset: qwen-toc
+- id: A-HT-S06
+  config: A-HT-S06.yaml
+  labels:
+    dataset: qwen-coder
+- id: A-HT-S07
+  config: A-HT-S07.yaml
+  labels:
+    dataset: qwen-thinking
+- id: A-HT-S08
+  config: A-HT-S08.yaml
+  labels:
+    dataset: mooncake-toolagent
+- id: A-HT-S09
+  config: A-HT-S09.yaml
+  labels:
+    dataset: mooncake-conversation
+- id: A-HT-S10
+  config: A-HT-S10.yaml
+  labels:
+    dataset: art-chat
+- id: A-HT-L01
+  config: A-HT-L01.yaml
+  labels:
+    dataset: ragpulse
+- id: A-HT-L02
+  config: A-HT-L02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: A-HT-L03
+  config: A-HT-L03.yaml
+  labels:
+    dataset: qwen-thinking
+- id: A-HT-L04
+  config: A-HT-L04.yaml
+  labels:
+    dataset: mooncake-synthetic
+- id: A-HT-L05
+  config: A-HT-L05.yaml
+  labels:
+    dataset: art-chat
+- id: A-LC-S01
+  config: A-LC-S01.yaml
+  labels:
+    dataset: ragpulse
+- id: A-LC-S02
+  config: A-LC-S02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: A-LC-S03
+  config: A-LC-S03.yaml
+  labels:
+    dataset: azure-2024-conv
+- id: A-LC-S04
+  config: A-LC-S04.yaml
+  labels:
+    dataset: burstgpt-3
+- id: A-LC-S05
+  config: A-LC-S05.yaml
+  labels:
+    dataset: qwen-toc
+- id: A-LC-S06
+  config: A-LC-S06.yaml
+  labels:
+    dataset: qwen-coder
+- id: A-LC-S07
+  config: A-LC-S07.yaml
+  labels:
+    dataset: qwen-thinking
+- id: A-LC-S08
+  config: A-LC-S08.yaml
+  labels:
+    dataset: mooncake-toolagent
+- id: A-LC-S09
+  config: A-LC-S09.yaml
+  labels:
+    dataset: mooncake-conversation
+- id: A-LC-S10
+  config: A-LC-S10.yaml
+  labels:
+    dataset: art-chat
+- id: A-LC-L01
+  config: A-LC-L01.yaml
+  labels:
+    dataset: ragpulse
+- id: A-LC-L02
+  config: A-LC-L02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: A-LC-L03
+  config: A-LC-L03.yaml
+  labels:
+    dataset: qwen-thinking
+- id: A-LC-L04
+  config: A-LC-L04.yaml
+  labels:
+    dataset: mooncake-synthetic
+- id: A-LC-L05
+  config: A-LC-L05.yaml
+  labels:
+    dataset: art-chat
+- id: D-HT-S01
+  config: D-HT-S01.yaml
+  labels:
+    dataset: ragpulse
+- id: D-HT-S02
+  config: D-HT-S02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: D-HT-S03
+  config: D-HT-S03.yaml
+  labels:
+    dataset: azure-2024-conv
+- id: D-HT-S04
+  config: D-HT-S04.yaml
+  labels:
+    dataset: burstgpt-3
+- id: D-HT-S05
+  config: D-HT-S05.yaml
+  labels:
+    dataset: qwen-toc
+- id: D-HT-S06
+  config: D-HT-S06.yaml
+  labels:
+    dataset: qwen-coder
+- id: D-HT-S07
+  config: D-HT-S07.yaml
+  labels:
+    dataset: qwen-thinking
+- id: D-HT-S08
+  config: D-HT-S08.yaml
+  labels:
+    dataset: mooncake-toolagent
+- id: D-HT-S09
+  config: D-HT-S09.yaml
+  labels:
+    dataset: mooncake-conversation
+- id: D-HT-S10
+  config: D-HT-S10.yaml
+  labels:
+    dataset: art-chat
+- id: D-HT-L01
+  config: D-HT-L01.yaml
+  labels:
+    dataset: ragpulse
+- id: D-HT-L02
+  config: D-HT-L02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: D-HT-L03
+  config: D-HT-L03.yaml
+  labels:
+    dataset: qwen-thinking
+- id: D-HT-L04
+  config: D-HT-L04.yaml
+  labels:
+    dataset: mooncake-synthetic
+- id: D-HT-L05
+  config: D-HT-L05.yaml
+  labels:
+    dataset: art-chat
+- id: D-LC-S01
+  config: D-LC-S01.yaml
+  labels:
+    dataset: ragpulse
+- id: D-LC-S02
+  config: D-LC-S02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: D-LC-S03
+  config: D-LC-S03.yaml
+  labels:
+    dataset: azure-2024-conv
+- id: D-LC-S04
+  config: D-LC-S04.yaml
+  labels:
+    dataset: burstgpt-3
+- id: D-LC-S05
+  config: D-LC-S05.yaml
+  labels:
+    dataset: qwen-toc
+- id: D-LC-S06
+  config: D-LC-S06.yaml
+  labels:
+    dataset: qwen-coder
+- id: D-LC-S07
+  config: D-LC-S07.yaml
+  labels:
+    dataset: qwen-thinking
+- id: D-LC-S08
+  config: D-LC-S08.yaml
+  labels:
+    dataset: mooncake-toolagent
+- id: D-LC-S09
+  config: D-LC-S09.yaml
+  labels:
+    dataset: mooncake-conversation
+- id: D-LC-S10
+  config: D-LC-S10.yaml
+  labels:
+    dataset: art-chat
+- id: D-LC-L01
+  config: D-LC-L01.yaml
+  labels:
+    dataset: ragpulse
+- id: D-LC-L02
+  config: D-LC-L02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: D-LC-L03
+  config: D-LC-L03.yaml
+  labels:
+    dataset: qwen-thinking
+- id: D-LC-L04
+  config: D-LC-L04.yaml
+  labels:
+    dataset: mooncake-synthetic
+- id: D-LC-L05
+  config: D-LC-L05.yaml
+  labels:
+    dataset: art-chat

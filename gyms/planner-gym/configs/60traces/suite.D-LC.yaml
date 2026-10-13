@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+name: static-baseline-D-LC
+cases:
+- id: D-LC-S01
+  config: D-LC-S01.yaml
+  labels:
+    dataset: ragpulse
+- id: D-LC-S02
+  config: D-LC-S02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: D-LC-S03
+  config: D-LC-S03.yaml
+  labels:
+    dataset: azure-2024-conv
+- id: D-LC-S04
+  config: D-LC-S04.yaml
+  labels:
+    dataset: burstgpt-3
+- id: D-LC-S05
+  config: D-LC-S05.yaml
+  labels:
+    dataset: qwen-toc
+- id: D-LC-S06
+  config: D-LC-S06.yaml
+  labels:
+    dataset: qwen-coder
+- id: D-LC-S07
+  config: D-LC-S07.yaml
+  labels:
+    dataset: qwen-thinking
+- id: D-LC-S08
+  config: D-LC-S08.yaml
+  labels:
+    dataset: mooncake-toolagent
+- id: D-LC-S09
+  config: D-LC-S09.yaml
+  labels:
+    dataset: mooncake-conversation
+- id: D-LC-S10
+  config: D-LC-S10.yaml
+  labels:
+    dataset: art-chat
+- id: D-LC-L01
+  config: D-LC-L01.yaml
+  labels:
+    dataset: ragpulse
+- id: D-LC-L02
+  config: D-LC-L02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: D-LC-L03
+  config: D-LC-L03.yaml
+  labels:
+    dataset: qwen-thinking
+- id: D-LC-L04
+  config: D-LC-L04.yaml
+  labels:
+    dataset: mooncake-synthetic
+- id: D-LC-L05
+  config: D-LC-L05.yaml
+  labels:
+    dataset: art-chat

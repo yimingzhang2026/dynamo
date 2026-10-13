@@ -10,7 +10,7 @@ complete.
 | v3 adapter | `src/autoscaling_arena/adapters/cloudai_mpc_v3.py` |
 | v3 tests | `tests/test_cloudai_mpc_v3.py` (`ARENA_AIS_TESTS=1` also validates the capacity model against the AIS database) |
 | Registration | `adapters/__init__.py`, `match_config.py` (`_CLOUDAI_MPC_TYPES`, key set, auto-filled keys), `match_runner.py` (factory) |
-| Leaderboard entries | `configs/match.sim.agg.all-datasets.yaml`, `configs/match.sim.disagg.all-datasets.yaml` (entry `cloudai-mpc`) |
+| Baseline configurations | `configs/60traces/` |
 
 ## Diagnosis that motivated the rewrite
 
@@ -51,33 +51,3 @@ the loader fills from the prefill engine when omitted. Accepted but ignored
 `reactive_rps_jump_ratio`, `kv_pressure_threshold`. The published entries set
 `scale_up_penalty: 0`, `scale_down_penalty: 0`, `reactive_queue_threshold: 6`,
 `cold_start_s: 30`, `max_replicas: 8`.
-
-## Measured effect of each step
-
-Each point was added on top of the previous one and A/B-tested on all 14
-workloads, one repetition (seed 0), against the published v1 rows of the same
-seed. Mean goodput per GPU-hour, agg:
-
-| Step | All 14 | Golden 6 | Mean rank of 6 |
-|---|---|---|---|
-| Published v1 | 1.132 | 0.660 | 4.25 |
-| 1 capacity model | 1.137 | 0.603 | 4.21 |
-| 2 order book | 1.127 | 0.604 | 4.29 |
-| 3 paths removed + scale-down rule | 1.294 | 0.750 | 3.00 |
-| 4 ratio objective with ITL | 1.334 | 0.814 | 2.79 |
-| 5 binned forecaster | 1.357 | 0.925 | 2.71 |
-
-Disagg after step 6: 0.729 → 0.929 (rank 4.00 → 3.14).
-
-Published leaderboard with 3 repetitions: agg 1.400 (v1 1.138), mean rank
-2.61, first on both agg tables; disagg 0.951 (v1 0.727), mean rank 3.18,
-third behind reactive and planner.
-
-## Known gaps
-
-* `rho` starts at its floor, so GPUs look cheap in the first minute; flat and
-  composition-shift over-buy early in agg.
-* The 15 s binning lags moderate steps: staircase and flash_crowd in agg are
-  below step 4's values.
-* In disagg v3 sometimes runs a third worker on the low-load Golden Set
-  traces where 1P1D scores best on the ratio.

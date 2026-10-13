@@ -225,10 +225,10 @@ def test_v3_decisions_stay_within_bounds(mode: str):
 @pytest.mark.parametrize(
     "isl,osl,rps,observed",
     [
-        (8300, 39, 5.4, 4.0),  # flat: prefill-bound
-        (8190, 39, 5.0, 3.6),  # staircase
-        (4478, 1676, 1.7, 1.4),  # steady-near-capacity: decode/KV-bound
-        (4413, 1685, 1.4, 1.4),  # step-and-recovery
+        (8300, 39, 5.4, 4.0),  # unit-a: prefill-bound
+        (8190, 39, 5.0, 3.6),  # unit-b
+        (4478, 1676, 1.7, 1.4),  # capacity-model regression input
+        (4413, 1685, 1.4, 1.4),  # capacity-model regression input
     ],
 )
 def test_ais_capacity_matches_observed_saturated_rates(isl, osl, rps, observed):
@@ -440,7 +440,7 @@ def test_forecaster_level_is_flat_on_constant_traffic_with_noise():
     _feed(f, [1.4, 1.6, 1.5, 1.7, 1.3, 1.5] * 6)  # 3 min of jittery 1.5 rps
     mean, hi = f.forecast(11, 5.0)
     assert mean[0] == pytest.approx(1.5, abs=0.1)
-    assert mean[-1] == pytest.approx(mean[0])  # no significant trend on flat data
+    assert mean[-1] == pytest.approx(mean[0])  # no significant trend on unit-a data
     assert hi[0] - mean[0] == pytest.approx(
         0.84 * (1.5 * (0.25 / (1.75 * 15.0) + 1 / 55.0)) ** 0.5, rel=0.1
     )

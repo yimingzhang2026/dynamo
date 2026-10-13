@@ -25,13 +25,13 @@ ARENA_ROOT = Path(__file__).resolve().parents[1]
 ENDPOINT_CATALOG = ARENA_ROOT / "configs" / "endpoints.example.json"
 
 SYNTHETIC_WORKLOADS = {
-    "flat",
-    "staircase",
-    "square_wave",
-    "flash_crowd",
-    "diurnal",
-    "decode_heavy",
-    "shared_prefix",
+    "unit-a",
+    "unit-b",
+    "unit-c",
+    "unit-d",
+    "unit-e",
+    "unit-f",
+    "unit-g",
 }
 
 
@@ -125,7 +125,7 @@ def _sim_yaml(
           num_decode: 3
     """,
     evaluations: str = """
-      workloads: [flat]
+      workloads: [unit-a]
     """,
     slo_profiles: str = """
       - name: interactive
@@ -250,7 +250,7 @@ def _real_yaml(
         "    - name: endpoint-under-test",
         f"      endpoint: {endpoint}",
         "evaluations:",
-        "  workloads: [flat]",
+        "  workloads: [unit-a]",
         "slo_profiles:",
         "  - name: interactive",
         "    ttft_ms: 300",
@@ -275,7 +275,7 @@ def _real_yaml(
     ],
 )
 def test_committed_examples_load_and_expand(filename: str, backend_type: str):
-    path = ARENA_ROOT / "configs" / filename
+    path = ARENA_ROOT / "tests" / "fixtures" / filename
     assert path.exists(), f"committed example is missing: {path}"
 
     config = load_match_config(path)
@@ -289,41 +289,6 @@ def test_committed_examples_load_and_expand(filename: str, backend_type: str):
     assert config.publish is not None
     assert config.expected_runs == len(runs)
     assert runs
-
-
-def test_golden_set_quickstart_loads_beside_trace(tmp_path: Path):
-    source = ARENA_ROOT / "configs" / "match.golden-set.quickstart.yaml"
-    config_path = tmp_path / "match.yaml"
-    config_path.write_text(source.read_text())
-    (tmp_path / "step-and-recovery.jsonl").write_text(
-        json.dumps(
-            {
-                "timestamp": 0,
-                "input_length": 16,
-                "output_length": 4,
-                "hash_ids": [1],
-            }
-        )
-        + "\n"
-    )
-
-    config = load_match_config(config_path)
-    runs = list(config.iter_runs())
-
-    assert config.expected_runs == len(runs) == 2
-    assert [_autoscaler_name(item) for item in config.backend.autoscalers] == [
-        "planner",
-        "keda",
-    ]
-    assert _evaluation_names(config) == ["step-and-recovery"]
-    assert config.backend.replay.telemetry_sample_interval_s == 5.0
-
-
-def test_real_example_runs_without_a_recorded_trace_or_dynamo_checkout():
-    config = load_match_config(ARENA_ROOT / "configs" / "match.real.example.yaml")
-
-    assert _evaluation_names(config) == ["flat"]
-    assert config.expected_runs == 8
 
 
 def test_external_trace_and_suite_expand_without_duplicates(tmp_path: Path):
@@ -447,7 +412,7 @@ def test_exact_dynamo_trace_is_rejected_for_real_backend(tmp_path: Path):
     trace.write_bytes(b"native-dynamo-trace")
     catalog_ref = os.path.relpath(ENDPOINT_CATALOG, tmp_path)
     body = _real_yaml(catalog_ref).replace(
-        "  workloads: [flat]",
+        "  workloads: [unit-a]",
         "  traces:\n"
         "    - name: recorded-native\n"
         "      format: dynamo\n"
@@ -593,7 +558,7 @@ def test_external_trace_name_cannot_shadow_builtin(tmp_path: Path):
         _sim_yaml(
             evaluations="""
               traces:
-                - name: flat
+                - name: unit-a
                   path: trace.jsonl
             """
         ),
@@ -1506,7 +1471,7 @@ def test_matrix_cardinality_and_run_ids_are_deterministic_and_safe(tmp_path: Pat
                   num_decode: 4
             """,
             evaluations="""
-              workloads: [flat, staircase]
+              workloads: [unit-a, unit-b]
             """,
             slo_profiles="""
               - name: latency
@@ -1532,7 +1497,7 @@ def test_matrix_cardinality_and_run_ids_are_deterministic_and_safe(tmp_path: Pat
         "static-small",
         "static-large",
     }
-    assert {_run_workload_name(run) for run in runs} == {"flat", "staircase"}
+    assert {_run_workload_name(run) for run in runs} == {"unit-a", "unit-b"}
     assert len({_profile_name(_run_profile(run)) for run in runs}) == 2
     assert len({_field(run, "repetition") for run in runs}) == 2
 
@@ -1618,7 +1583,7 @@ def test_max_runs_rejects_accidental_matrix_explosion(tmp_path: Path):
         tmp_path,
         _sim_yaml(
             evaluations="""
-              workloads: [flat, staircase]
+              workloads: [unit-a, unit-b]
             """,
             slo_profiles="""
               - name: latency-grid
@@ -1813,9 +1778,9 @@ def test_reactive_threshold_order_includes_defaults(
 )
 @pytest.mark.parametrize("equals", [False, True])
 def test_real_config_rejects_block_size_overrides(tmp_path, flag, equals):
-    body = (ARENA_ROOT / "configs/match.real.example.yaml").read_text()
+    body = (ARENA_ROOT / "tests/fixtures/match.real.example.yaml").read_text()
     body = body.replace(
-        "endpoint_catalog: endpoints.example.yaml",
+        "endpoint_catalog: ../../configs/endpoints.example.yaml",
         f"endpoint_catalog: {ARENA_ROOT / 'configs/endpoints.example.yaml'}",
     )
     arguments = [f"{flag}=16"] if equals else [flag, "16"]

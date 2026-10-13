@@ -10,7 +10,9 @@ from autoscaling_arena.match_config import MatchConfigError, load_match_config
 
 def load_example(tmp_path, changes=None):
     root = Path(__file__).resolve().parents[1]
-    config = yaml.safe_load((root / "configs/match.jev.example.yaml").read_text())
+    config = yaml.safe_load(
+        (root / "tests/fixtures/match.jev.example.yaml").read_text()
+    )
     config["backend"]["planner_config"] = str(root / "configs/planner.sim.example.yaml")
     config["backend"]["autoscalers"][0]["config"].update(changes or {})
     path = tmp_path / "match.yaml"

@@ -8,8 +8,8 @@ Serves the recurrent agg checkpoints trained by ``cql_trainer``
 five-second replay telemetry, the last ten of them passed through a 32-unit
 LSTM whose final hidden state is concatenated with the latest observation
 and fed to the residual Q head (nine relative deltas, fleet 1-8, Q-only). The
-leaderboard entry ``cloudai-rl`` (agg) is the ``v3_lstm_current`` export,
-``checkpoints/cql_autoscaler_best_v3_lstm.pt``. The v3 observation encoders
+checkpoint path must refer to a policy trained for the experiment settings.
+The v3 observation encoders
 (``V3StateEncoder`` with its smoothing switch, ``RawV3Encoder``) and the exact
 bounded-target action helpers live here as well.
 

@@ -12,27 +12,13 @@ from autoscaling_arena.datasets.dynamo_trace import (
     open_trace,
     parse_trace_event,
 )
-from autoscaling_arena.datasets.golden_set import (
-    GOLDEN_SET_SCHEMA_VERSION,
-    BaseRequest,
-    GoldenSetRecipe,
-    GoldenSetResult,
-    build_golden_set,
-    load_golden_set_recipe,
-)
 
 __all__ = [
-    "GOLDEN_SET_SCHEMA_VERSION",
     "TRACE_SCHEMA",
-    "BaseRequest",
-    "GoldenSetRecipe",
-    "GoldenSetResult",
     "RequestMetrics",
     "TraceEvent",
-    "build_golden_set",
     "discover_trace_shards",
     "iter_trace_lines",
-    "load_golden_set_recipe",
     "open_trace",
     "parse_trace_event",
 ]

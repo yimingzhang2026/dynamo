@@ -20,7 +20,7 @@ use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
 use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
 
 const BLOCK_SIZE: u32 = 128;
-// mooncake_trace_1000.jsonl records one hash per 512-token trace block.
+// prefix_reuse_sample.jsonl records one hash per 512-token trace block.
 const TRACE_BLOCK_SIZE: u32 = 512;
 const NUM_GPU_BLOCKS: usize = 16384;
 const TRACE_SIMULATION_DURATION_MS: Option<u64> = None;
@@ -32,7 +32,7 @@ async fn active_sequences_trace_replays_without_warnings_or_leaks() -> anyhow::R
     let warning_count = support::warning_counter(&["dynamo_kv_router::sequences", "dynamo_mocker"]);
     support::reset_warning_count(&warning_count);
 
-    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let fixture = support::fixture_path("prefix_reuse_sample.jsonl")?;
     let traces = process_mooncake_trace(
         &fixture,
         TRACE_BLOCK_SIZE,

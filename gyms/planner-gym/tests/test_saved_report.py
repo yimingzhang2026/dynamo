@@ -62,7 +62,7 @@ def _normalized_report() -> dict[str, Any]:
                 "run_id": "saved-static",
                 "backend": "sim",
                 "autoscaler": "static",
-                "workload": "flat",
+                "workload": "unit-a",
                 "sla": "interactive",
                 "repetition": 0,
                 "status": "ok",
@@ -97,7 +97,7 @@ backend:
       type: static
       config: {num_prefill: 1, num_decode: 1}
 evaluations:
-  workloads: [flat]
+  workloads: [unit-a]
 slo_profiles:
   - name: interactive
     ttft_ms: 300
@@ -183,7 +183,7 @@ def test_render_saved_result_embeds_validated_portable_replay_command(
     rendered = output.read_text()
     assert "configs/saved.match.yaml" in rendered
     assert f"--expect-config-sha256 {match_replay_sha256(config)}" in rendered
-    assert "--run-id 0001-sim-static-flat-interactive-r0-s0" in rendered
+    assert "--run-id 0001-sim-static-unit-a-interactive-r0-s0" in rendered
     assert str(tmp_path) not in rendered
 
 

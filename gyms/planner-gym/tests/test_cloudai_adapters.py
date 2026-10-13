@@ -28,7 +28,7 @@ from autoscaling_arena.match_config import (
 
 ARENA_ROOT = Path(__file__).resolve().parents[1]
 PLANNER_CONFIG = ARENA_ROOT / "configs" / "planner.sim.example.yaml"
-CLOUDAI_EXAMPLE = ARENA_ROOT / "configs" / "match.sim.cloudai.example.yaml"
+CLOUDAI_EXAMPLE = ARENA_ROOT / "tests" / "fixtures" / "match.sim.cloudai.example.yaml"
 
 # ``substrate: gpt_oss`` pins the canonical AIS identity of the prefill engine.
 EXPECTED_AIS_SPEC = {
@@ -66,7 +66,7 @@ def _write_sim_config(
           autoscalers:
         @@AUTOSCALERS@@
         evaluations:
-          workloads: [flat]
+          workloads: [unit-a]
           defaults:
             seed: 0
             max_requests: 50
@@ -218,7 +218,7 @@ def test_unknown_autoscaler_type_lists_cloudai_choices(tmp_path: Path):
     assert "cloudai_mpc_v2" not in message and "cloudai_rl_v3" not in message
 
 
-def test_committed_cloudai_example_expands_the_roster():
+def test_cloudai_fixture_expands_the_roster():
     config = load_match_config(CLOUDAI_EXAMPLE)
     backend = config.backend
     assert isinstance(backend, SimBackendConfig)
@@ -234,7 +234,7 @@ def test_committed_cloudai_example_expands_the_roster():
         "cloudai_rl_lstm",
     }
     assert backend.topology == "agg" and backend.replay.telemetry_sample_interval_s == 5
-    assert config.expected_runs == len(list(config.iter_runs())) == 48
+    assert config.expected_runs == len(list(config.iter_runs())) == 12
 
 
 # --------------------------------------------------------------------------- #

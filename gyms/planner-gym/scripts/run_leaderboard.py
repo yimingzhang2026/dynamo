@@ -13,7 +13,7 @@ gpt-oss.
     export DYNAMO_DIR=/absolute/path/to/dynamo
     source .venv/bin/activate
     python scripts/run_leaderboard.py \\
-        --workloads staircase flash_crowd mooncake --profile interactive
+        --workloads my-input --profile interactive
 """
 
 from __future__ import annotations
@@ -59,8 +59,8 @@ def main() -> int:
     p.add_argument(
         "--workloads",
         nargs="+",
-        default=["mooncake", "staircase", "flash_crowd"],
-        help="workload names, or 'all'",
+        required=True,
+        help="explicitly registered workload names, or 'all'",
     )
     p.add_argument(
         "--profile",

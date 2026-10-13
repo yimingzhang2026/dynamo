@@ -4,8 +4,8 @@
 """CloudAI RL agg LSTM and disagg policies: encoders, networks, Match Config and wiring.
 
 Pure-Python Match Config / factory tests run everywhere; the encoder, network
-and adapter tests need torch plus the optional Dynamo types (and the Git LFS
-checkpoints) and skip cleanly without them.
+and adapter tests need torch plus the optional Dynamo types. Their checkpoints
+are freshly initialized synthetic networks with no training data.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from autoscaling_arena import match_config, match_runner
+from autoscaling_arena import match_runner
 from autoscaling_arena.match_config import (
     MatchConfigError,
     SimBackendConfig,
@@ -28,14 +28,20 @@ from autoscaling_arena.match_config import (
 
 ARENA_ROOT = Path(__file__).resolve().parents[1]
 PLANNER_CONFIG = ARENA_ROOT / "configs" / "planner.sim.example.yaml"
-CHECKPOINTS = ARENA_ROOT / "checkpoints"
-# Only the leaderboard exports (v3 + LSTM in each mode) are bundled.
-AGG_LSTM = {"v3": CHECKPOINTS / "cql_autoscaler_best_v3_lstm.pt"}
-DISAGG = {"disagg_v3_lstm": CHECKPOINTS / "cql_autoscaler_best_disagg_v3_lstm.pt"}
+AGG_LSTM = {"v3": Path("unit-agg.pt")}
+DISAGG = {"disagg_v3_lstm": Path("unit-disagg.pt")}
 
 
-def _real(path: Path) -> bool:
-    return path.is_file() and path.stat().st_size > 1024
+@pytest.fixture(autouse=True)
+def checkpoint_paths(tmp_path, monkeypatch):
+    # Parser-only tests check paths; adapter tests replace these with seeded networks.
+    for mapping, key, filename in [
+        (AGG_LSTM, "v3", "unit-agg.pt"),
+        (DISAGG, "disagg_v3_lstm", "unit-disagg.pt"),
+    ]:
+        path = tmp_path / filename
+        path.write_text("Parser-only fixture; not a model.\n")
+        monkeypatch.setitem(mapping, key, path)
 
 
 def _write_config(tmp_path: Path, *, autoscalers: str, topology: str) -> Path:
@@ -68,7 +74,7 @@ def _write_config(tmp_path: Path, *, autoscalers: str, topology: str) -> Path:
           autoscalers:
         @@AUTOSCALERS@@
         evaluations:
-          workloads: [flat]
+          workloads: [unit-a]
           defaults:
             seed: 0
             max_requests: 50
@@ -255,35 +261,6 @@ def test_cloudai_rl_disagg_is_disagg_only(tmp_path: Path):
                 """,
             )
         )
-
-
-def test_committed_rl_leaderboard_configs_expand_seven_entries(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    if not (ARENA_ROOT / "data" / "golden-set" / "astra-gpt-oss").is_dir():
-        # The Golden Set traces are gitignored (data/README.md). Without them,
-        # check the configs' structure and skip only the trace-file checks.
-        monkeypatch.setattr(
-            match_config, "_require_trace_file", lambda source, *, path: None
-        )
-        monkeypatch.setattr(
-            match_config, "validate_mooncake_trace", lambda *args, **kwargs: None
-        )
-    for mode, expected_type in (
-        ("agg", "cloudai_rl_lstm"),
-        ("disagg", "cloudai_rl_disagg"),
-    ):
-        config = load_match_config(
-            ARENA_ROOT / "configs" / f"match.sim.{mode}.all-datasets.yaml"
-        )
-        backend = config.backend
-        assert isinstance(backend, SimBackendConfig)
-        types_by_name = {entry.name: entry.type for entry in backend.autoscalers}
-        assert types_by_name["cloudai-rl"] == expected_type
-        assert len(backend.autoscalers) == 7
-        assert config.expected_runs == len(list(config.iter_runs())) == 294
-        html = [d.path.name for d in config.publish.destinations if d.type == "html"]
-        assert html == [f"report.{mode}.html"]
 
 
 # --------------------------------------------------------------------------- #
@@ -684,8 +661,7 @@ def test_disagg_adapter_follows_requested_targets_and_rejects_runtime_drift(
     tmp_path: Path,
 ):
     _, _, disagg = _modules()
-    if not all(_real(path) for path in DISAGG.values()):
-        pytest.skip("disagg CQL checkpoints are Git LFS pointers; run `git lfs pull`")
+    _save_synthetic_checkpoints()
     dynamo_types = pytest.importorskip("dynamo.planner.core.types")
     for name, path in DISAGG.items():
         rl = disagg.CloudAIRLDisaggAutoscaler(
@@ -728,8 +704,7 @@ def test_disagg_adapter_follows_requested_targets_and_rejects_runtime_drift(
 
 def test_agg_lstm_adapter_decides_over_bounded_history(tmp_path: Path):
     _, lstm, _ = _modules()
-    if not all(_real(path) for path in AGG_LSTM.values()):
-        pytest.skip("agg LSTM checkpoints are Git LFS pointers; run `git lfs pull`")
+    _save_synthetic_checkpoints()
     dynamo_types = pytest.importorskip("dynamo.planner.core.types")
     for version, path in AGG_LSTM.items():
         rl = lstm.CloudAIRLAutoscaleLSTM(
@@ -769,3 +744,62 @@ def test_agg_lstm_adapter_decides_over_bounded_history(tmp_path: Path):
         )
     with pytest.raises(ValueError, match="Expected an agg LSTM checkpoint"):
         lstm.CloudAIRLAutoscaleLSTM(str(DISAGG["disagg_v3_lstm"]))
+
+
+def _save_synthetic_checkpoints():
+    """Exercise adapter loading with deterministic untrained networks."""
+    common, lstm, disagg = _modules()
+    torch = pytest.importorskip("torch")
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        agg_arch = dict(
+            state_dim=27,
+            num_actions=9,
+            hidden_dim=256,
+            num_blocks=4,
+            lstm_hidden_dim=32,
+        )
+        agg_metadata = dict(
+            version="v3_lstm_current",
+            feature_schema="agg_v3_lstm_current_27",
+            features=lstm.V3_FEATURES,
+            architecture=agg_arch,
+            settings=dict(
+                max_replicas=8,
+                slo_ttft_ms=2000.0,
+                slo_itl_ms=50.0,
+                cold_start_delay_s=30.0,
+                max_kv_tokens=8192.0,
+            ),
+        )
+        torch.save(
+            dict(
+                metadata=agg_metadata,
+                q_net_state_dict=common.LSTMQNetwork(**agg_arch).state_dict(),
+            ),
+            AGG_LSTM["v3"],
+        )
+        disagg_arch = dict(
+            state_dim=37,
+            num_actions=7,
+            hidden_dim=256,
+            num_blocks=4,
+            lstm_hidden_dim=32,
+        )
+        disagg_metadata = dict(
+            version="disagg_v3",
+            lstm=True,
+            feature_schema=disagg.schema_name("v3", True),
+            features=disagg.feature_names("v3", True),
+            architecture=disagg_arch,
+            settings=dict(disagg.DEFAULT_SETTINGS),
+        )
+        torch.save(
+            dict(
+                metadata=disagg_metadata,
+                q_net_state_dict=common.BranchingLSTMQNetwork(
+                    **disagg_arch
+                ).state_dict(),
+            ),
+            DISAGG["disagg_v3_lstm"],
+        )

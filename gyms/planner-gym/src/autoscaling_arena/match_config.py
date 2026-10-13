@@ -333,9 +333,8 @@ _CLOUDAI_RL_DISAGG_DEFAULTS = {
 }
 
 # The RL types take an explicit ``checkpoint_path`` (relative paths resolve
-# against the Match Config's directory). The bundled exports are
-# checkpoints/cql_autoscaler_best_{v3_lstm,disagg_v3_lstm}.pt, the leaderboard
-# entry ``cloudai-rl``.
+# against the Match Config's directory). Supply a checkpoint trained for the
+# experiment's model, hardware and observation settings.
 
 
 class MatchConfigError(ValueError):
@@ -1642,7 +1641,7 @@ def _resolve_cloudai_config(
     if not checkpoint.is_file():
         raise MatchConfigError(
             f"{path}.checkpoint_path: {checkpoint} does not exist; set it to an "
-            "existing CQL checkpoint (the bundled exports live in checkpoints/)"
+            "existing CQL checkpoint trained for this experiment"
         )
     config["checkpoint_path"] = str(checkpoint)
 

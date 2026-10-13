@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+
+schema_version: 1
+name: live-endpoint-comparison
+description: Compare already-deployed autoscaling stacks with AIPerf.
+
+backend:
+  type: real
+  endpoint_catalog: ../../configs/endpoints.example.yaml
+
+  aiperf:
+    executable: aiperf
+    tokenizer: null
+    streaming: true
+    timeout_s: 900
+    extra_args: []
+
+  autoscalers:
+    - name: fast-deployment
+      endpoint: fast-endpoint
+    - name: slow-deployment
+      endpoint: slow-endpoint
+
+evaluations:
+  workloads: [unit-a, unit-b]
+  defaults:
+    seed: 0
+    max_requests: 20
+
+slo_profiles:
+  - name: interactive
+    ttft_ms: [300, 500]
+    itl_ms: [50, 100]
+
+metrics:
+  rank_by: goodput_rps
+  include:
+    - goodput_rps
+    - request_throughput_rps
+    - mean_ttft_ms
+    - p99_ttft_ms
+    - mean_itl_ms
+    - p99_itl_ms
+
+execution:
+  repetitions: 1
+  fail_fast: false
+  max_runs: 16
+
+publish:
+  artifact_root: ../runs/match-real/artifacts
+  destinations:
+    - type: console
+    - type: json
+      path: ../runs/match-real/results.json
+    - type: html
+      path: ../runs/match-real/report.html

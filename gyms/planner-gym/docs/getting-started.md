@@ -1,112 +1,39 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Run Your First Planner Gym Comparison
+# Get started with the 60-case suite
 
-Run Dynamo Planner and the KEDA/HPA policy port against 100 requests from the
-public Mooncake trace bundled with Dynamo, then inspect an HTML report. This
-CPU simulation requires no GPU or model weights.
-
-## 1. Prepare a Dynamo checkout
-
-Use Linux with Git, Python 3.12, Rust through `rustup`, and the compiler and
-system libraries listed in Dynamo's
-[source-build guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/advanced-customizations/building-from-source.md).
-Internet access is needed to install dependencies and resolve performance data.
-The pinned AISimulate package currently provides Linux wheels only.
-
-For a new checkout:
+Work in `gyms/planner-gym/`. See [data setup](../data/README.md) for download and
+preparation. A lightweight environment can validate inputs and configs:
 
 ```bash
-git clone https://github.com/ai-dynamo/dynamo.git
-cd dynamo/gyms/planner-gym
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python -e '.[test]' -r data/60traces/reproduction/requirements-convert.txt
+.venv/bin/python scripts/run_suite_config.py configs/60traces/suite.yaml --dry-run
 ```
 
-If Dynamo is already checked out, change to its `gyms/planner-gym` directory.
-Keep Gym, Dynamo's Python package, and the native runtime on the same revision.
+Native simulations run on CPUs but require Dynamo's native replay bindings and
+AISimulate. The reproduction package pins Linux, Python 3.11/3.12 and AISimulate
+`0.13.0.dev202610060000000067`. Refer to its `software.json` and `README.md` for
+the reference runtime. Config validation alone does not prove native compatibility.
 
-## 2. Build the simulation environment
+With a compatible runtime installed, start with one small case:
 
 ```bash
-bash scripts/setup_simulation_env.sh
-source .venv/bin/activate
+python scripts/run_match_config.py configs/60traces/A-LC-S08.yaml
 ```
 
-The script locates the containing Dynamo checkout, creates `.venv`, builds its
-native runtime, installs the Python packages, and checks the replay telemetry
-API. The first native build can take several minutes. An existing `.venv` is
-preserved: move it aside before requesting a fresh setup.
-
-## 3. Validate the two-run matrix
+To execute and resume the complete campaign:
 
 ```bash
-python scripts/run_match_config.py configs/match.quickstart.yaml   --validate-only --print-matrix
+python scripts/run_suite_config.py configs/60traces/suite.yaml --output-dir runs/static-60
+python scripts/run_suite_config.py configs/60traces/suite.yaml --output-dir runs/static-60 --resume
 ```
 
-The output reports `2 sim runs selected`: Planner and KEDA, each starting with
-one prefill and one decode worker, one workload, and one relaxed SLO. The
-example uses the same gpt-oss/H200/vLLM performance model for both policies.
-Validation checks configuration and source paths; running the match also
-checks native imports and performance-data availability.
+The largest reference replay exceeded 85 GiB RSS and 48 minutes. Check each
+case's memory and timeout limits before selecting the full campaign. Resume
+requires the same configs, inputs, runtime and output location.
 
-## 4. Run the match
-
-```bash
-python scripts/run_match_config.py configs/match.quickstart.yaml
-```
-
-Expect two successful rows and output paths beneath `runs/quickstart/`:
-
-```text
-runs/quickstart/
-├── artifacts/<session>/runs/<run-id>/
-│   ├── telemetry.jsonl
-│   └── trace-report.json
-├── results.json
-└── report.html
-```
-
-A failed row is not a benchmark result. Read its error in the terminal and
-`results.json` before comparing policies.
-
-## 5. Inspect the report
-
-Open `runs/quickstart/report.html` in a browser. Compare goodput per GPU together
-with the good-request rate, latency, allocation, and scaling timelines. The
-short example verifies the workflow; it is not a representative policy study.
-
-The HTML embeds its data and plotting code. Rerender it without another replay:
-
-```bash
-python scripts/render_saved_report.py runs/quickstart/results.json   --out runs/quickstart/report-rerendered.html
-```
-
-To rerun the match and replace the top-level JSON and HTML, pass `--overwrite`.
-Each replay still gets a new artifact session directory.
-
-## Next Steps
-
-- Expand workloads and SLOs with the
-  [Match Config guide](usage.md#user-guide-run-a-match-config).
-- Build a [Golden Set](usage.md#build-a-golden-set-from-an-external-base-trace)
-  from your own trace, then copy
-  [the complete Golden Set config](../configs/match.golden-set.quickstart.yaml)
-  beside `step-and-recovery.jsonl` and match `block_size` to the manifest.
-- Use the [endpoint guide](usage.md#user-guide-benchmark-live-endpoints) to
-  compare live deployments.
-
-## Troubleshooting
-
-For `ModuleNotFoundError` or missing replay parameters, rebuild with
-`scripts/setup_simulation_env.sh` from the same checkout. An editable Python
-install does not rebuild Rust.
-
-For missing Mooncake data, verify
-`lib/bench/testdata/mooncake_trace_1000.jsonl` exists in the containing Dynamo
-checkout. `DYNAMO_DIR` can explicitly select another checkout.
-
-For unsupported model/system/backend errors, check the installed AISimulate
-performance data and the model settings in the config. Config validation alone
-does not resolve that data.
+Read [the experiment and trace inventory](traces-60.md) before comparing results.

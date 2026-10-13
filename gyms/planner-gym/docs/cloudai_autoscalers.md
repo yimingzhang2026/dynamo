@@ -6,8 +6,8 @@ reactive, static, Jev) as first-class Match Config autoscaler types:
 | Leaderboard entry | Class | Module | Approach |
 |---|---|---|---|
 | `cloudai-mpc` | `CloudAIMPCV3Autoscaler` (type `cloudai_mpc_v3`) | `adapters/cloudai_mpc_v3.py` | Model Predictive Control: a saturated-capacity plant model over AIS (AISimulate) prefill/decode predictions, a cold-start order book, a model-based scale-down rule, a goodput-per-GPU (Dinkelbach) objective with ITL, and a binned arrival forecaster; independent prefill/decode pools in disagg. Design and measured effect of each step: [cloudai_mpc_v3.md](cloudai_mpc_v3.md). |
-| `cloudai-rl` (agg) | `CloudAIRLAutoscaleLSTM` (type `cloudai_rl_lstm`) | `adapters/cloudai_rl_lstm.py` | Offline-RL (CQL) policy over 27 current-interval replay-telemetry features, the last ten observations through a 32-unit LSTM, nine relative deltas with exact bounded-target masks, Q-only. Checkpoint `checkpoints/cql_autoscaler_best_v3_lstm.pt`. |
-| `cloudai-rl` (disagg) | `CloudAIRLDisaggAutoscaler` (type `cloudai_rl_disagg`) | `adapters/cloudai_rl_disagg.py` | Offline-RL (CQL) two-pool policy over 37 current-interval telemetry features plus its last requested targets, ten-step LSTM, one delta per pool from an additive two-head critic (prefill 1-16, decode 1-8), infeasible deltas masked, Q-only. Checkpoint `checkpoints/cql_autoscaler_best_disagg_v3_lstm.pt`. |
+| `cloudai-rl` (agg) | `CloudAIRLAutoscaleLSTM` (type `cloudai_rl_lstm`) | `adapters/cloudai_rl_lstm.py` | Offline-RL (CQL) policy over 27 current-interval replay-telemetry features, the last ten observations through a 32-unit LSTM, nine relative deltas with exact bounded-target masks, Q-only. Requires a compatible, explicitly supplied checkpoint. |
+| `cloudai-rl` (disagg) | `CloudAIRLDisaggAutoscaler` (type `cloudai_rl_disagg`) | `adapters/cloudai_rl_disagg.py` | Offline-RL (CQL) two-pool policy over 37 current-interval telemetry features plus its last requested targets, ten-step LSTM, one delta per pool from an additive two-head critic (prefill 1-16, decode 1-8), infeasible deltas masked, Q-only. Requires a compatible, explicitly supplied checkpoint. |
 
 Shared inference code lives in `adapters/cql_common.py` (residual Q head,
 LSTM encoder, two-head critic, bounded history window, replay-telemetry adapter
@@ -20,7 +20,7 @@ tick never cancels a scale-up still in flight.
 
 ```bash
 pip install -e '.[cloudai]'        # numpy (MPC) and torch (CPU inference for RL)
-# the two 17 MB CQL exports ship in checkpoints/ (plain Git)
+# supply a checkpoint trained for your experiment settings
 ```
 
 Both adapters run inside Dynamo's replay runtime through the Arena's
@@ -103,22 +103,8 @@ values, history length, current and target counts). Replaying a run's
 offline/serving parity was checked against the trainer's own code on every
 published run (2026-10-02).
 
-## Leaderboards and tables
+## Experiments
 
-- `configs/match.sim.agg.all-datasets.yaml` and
-  `configs/match.sim.disagg.all-datasets.yaml`: the seven-planner sweeps
-  (Planner, Jev, KEDA, reactive, static, `cloudai-mpc`, `cloudai-rl`) over the
-  eight registry workloads and the six Astra GPT-OSS Golden Set traces, 3
-  repetitions, SLA TTFT 2000 ms / ITL 50 ms, ranked by `goodput_per_gpu`.
-- `scripts/rank_tables.py results.json`: mean-rank and pairwise-win-rate tables
-  on `goodput_per_gpu` for all workloads and for the Golden Set.
-- `scripts/evaluation_table.py --results agg=... --results disagg=... --out
-  evaluation.md`: the final summary tables (every column as `all (golden)`,
-  goodput per GPU-second) plus an `.xlsx` workbook with per-workload goodput,
-  rank matrices and the long-form data (needs the `xlsx` extra).
-- `configs/match.sim.cloudai.example.yaml`: a registry-only agg example of the
-  roster that validates in CI.
-
-The published tables live in [`results/`](../results/README.md) with the
-exact commands that regenerate them; raw results JSON, HTML reports and
-per-run artifacts land under the gitignored `runs/`.
+Use the [60-case static suite](../configs/60traces/suite.yaml) as the baseline.
+Add planner policies in separate configs after calibrating their settings and
+training compatible RL checkpoints for this model and hardware.

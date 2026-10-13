@@ -39,11 +39,11 @@ cargo test -p dynamo-llm --no-default-features
 
 Use the fixture-backed tests in `lib/bench/tests` when you want a realistic replay path without launching the full router stack. These tests share the same replay machinery as the Mooncake and active-sequences benches, but run in the Rust test profile and assert invariants instead of reporting benchmark numbers.
 
-Current coverage uses the checked-in 1000-line Mooncake trace fixture:
+Current coverage uses the checked-in 64-record synthetic prefix-reuse fixture:
 
 - [active_sequences_trace.rs](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/tests/active_sequences_trace.rs)
 - [mooncake_trace.rs](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/tests/mooncake_trace.rs)
-- [mooncake_trace_1000.jsonl](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl)
+- [prefix_reuse_sample.jsonl](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/prefix_reuse_sample.jsonl)
 
 These tests are useful for catching regressions such as:
 

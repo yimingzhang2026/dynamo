@@ -10,28 +10,13 @@ It replaces the decision engine inside Gym replay: Jev's selections directly
 produce `PlannerEffects.scale_to`. The native Planner remains a separate baseline.
 This does not configure a deployed Dynamo Planner service.
 
-## Run the pilot
+## Configure an experiment
 
-Use the same working Dynamo runtime as other offline Gym matches. From `gyms/planner-gym`:
-
-```bash
-python -m pip install -e '.[jev]'
-# Supply TYPESAFE_API_KEY through your environment/secret manager.
-python scripts/run_match_config.py configs/match.jev.example.yaml --validate-only --print-matrix
-python scripts/run_match_config.py configs/match.jev.example.yaml
-```
-
-The pilot compares Jev, Planner, KEDA/HPA port, reactive, and static 4P4D on
-flat, staircase, and flash-crowd synthetic workloads. It pins Jev to
-`jev-1.13.0` and the serving performance model to vLLM `0.24.0` on H200.
-Check that the installed AISimulate performance data supports that serving version. Validation
-does not import the Jev adapter or contact TypeSafe.
-
-There are three Jev cells, each capped at 100 calls with no retry. A missing API
-key fails at construction. Hosted calls use TypeSafe's
-[documented HTTP API](https://docs.typesafe.ai/api); the optional `jev` extra
-provides the HTTP client. Keys are accepted only through `TYPESAFE_API_KEY`,
-never the Match Config. Run directories are unique and logs cannot be overwritten.
+Copy a config from `configs/60traces/` into a separate experiment directory,
+update its relative paths and add a `jev` policy with explicit replica limits.
+Provide `TYPESAFE_API_KEY` through the environment. Hosted policy calls require
+an explicit experiment plan and API-call budget. The static baseline has no
+hosted policy calls.
 
 ## Decision contract
 
@@ -69,12 +54,6 @@ separately and cannot be interpreted as already included in TTFT or GPU-hours.
 Delayed-action simulation or a live deployment is needed for that comparison.
 
 Read goodput/GPU together with good rate, latency, GPU-hours, and oscillation.
-The native policies retain their documented defaults: Planner polls every five
-seconds, KEDA/reactive/Jev every fifteen; dynamic policies start at 1P1D and
-static starts at 4P4D. Jev/reactive/KEDA maxima are 16P8D within the common
-32-GPU budget; Planner has its own allocation rules. These are policy-package
-comparisons, not controlled ablations of the decision mechanism alone.
-
 Freeze prompts and settings before testing held-out workloads. Repeat Jev cells
 to measure variability, and report failed or gated decisions. Tests using local
 HTTP fixtures validate integration only; they provide no evidence of Jev's

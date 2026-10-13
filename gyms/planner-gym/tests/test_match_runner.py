@@ -167,7 +167,7 @@ def _sim_config(
         backend=backend,
         evaluations=(
             EvaluationConfig(
-                workload="flat",
+                workload="unit-a",
                 seed=17,
                 max_requests=5,
                 arrival_speedup=2.0,
@@ -289,7 +289,10 @@ def _write_cli_sim_config(
                     num_prefill: 1
                     num_decode: 1
             evaluations:
-              workloads: [flat]
+              traces:
+                - name: cli-input
+                  path: unit-trace.jsonl
+                  block_size: 512
             slo_profiles:
               - name: interactive
                 ttft_ms: 300
@@ -309,6 +312,9 @@ def _write_cli_sim_config(
             "    ",
         )
         + "\n"
+    )
+    (tmp_path / "unit-trace.jsonl").write_text(
+        '{"timestamp":0,"input_length":512,"output_length":8,"hash_ids":[1]}\n'
     )
     return config_path
 
@@ -421,7 +427,7 @@ def test_validate_only_does_not_import_runtime_backends_or_create_artifacts(
 
     assert proc.returncode == 0, proc.stderr
     assert "Valid Match Config: 'validate-only-unit'" in proc.stdout
-    assert "0001-sim-fixed-flat-interactive-r0-s0" in proc.stdout
+    assert "0001-sim-fixed-cli-input-interactive-r0-s0" in proc.stdout
     assert not (tmp_path / "artifacts").exists()
 
 
@@ -1055,7 +1061,7 @@ def test_console_ranking_orders_best_first_and_missing_or_failed_last(
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
             "autoscaler": autoscaler,
-            "workload": "flat",
+            "workload": "unit-a",
             "sla": "interactive",
             "repetition": 0,
             "status": status,
@@ -1089,7 +1095,7 @@ def test_console_ranking_orders_best_first_and_missing_or_failed_last(
         output.index(name) for name in ("best", "second", "missing", "crashed")
     ]
     assert positions == sorted(positions)
-    assert "flat | interactive | repetition 0" in output
+    assert "unit-a | interactive | repetition 0" in output
     assert "crashed              FAILED MockFailure: boom" in output
 
 
@@ -1425,10 +1431,10 @@ def test_publisher_refuses_existing_html_without_overwrite(tmp_path: Path):
 
 @pytest.mark.timeout(30)
 def test_generated_replay_command_validates_from_documented_gym_directory():
-    config = load_match_config(ARENA_ROOT / "configs/match.quickstart.yaml")
+    config = load_match_config(ARENA_ROOT / "tests/fixtures/match.quickstart.yaml")
     run = next(config.iter_runs())
     config_reference = match_runner._safe_replay_config_path(config)
-    assert config_reference == "configs/match.quickstart.yaml"
+    assert config_reference == "tests/fixtures/match.quickstart.yaml"
     report = {
         "provenance": {
             "replay_config_sha256": match_runner.match_replay_sha256(config),
