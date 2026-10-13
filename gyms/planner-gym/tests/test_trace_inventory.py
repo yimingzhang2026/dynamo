@@ -72,8 +72,11 @@ def test_all_cases_use_explicit_test_inputs_and_consistent_groups(tmp_path):
         assert all(case.case_id.startswith(group + "-") for case in selected.cases)
 
 
-def test_inventory_matches_case_recipes_and_does_not_claim_training():
+def test_inventory_matches_case_recipes_and_separate_history():
     catalog = json.loads((ROOT / "configs/60traces/catalog.json").read_text())
+    histories = json.loads((ROOT / "configs/60traces/history.json").read_text())[
+        "histories"
+    ]
     with (ROOT / "docs/traces-60.csv").open() as stream:
         rows = {row["case_id"]: row for row in csv.DictReader(stream)}
     assert len(rows) == 60
@@ -82,8 +85,17 @@ def test_inventory_matches_case_recipes_and_does_not_claim_training():
         assert int(row["test_bytes"]) == case["preparation"]["expected_output_bytes"]
         assert int(row["test_requests"]) == case["preparation"]["expected_requests"]
         assert row["sha256"] == case["preparation"]["expected_output_sha256"]
-        assert row["training_materialized"] == "False"
-        assert row["rl_training_split"] == "Not defined"
+        history = histories.get(case["source_id"])
+        assert row["training_materialized"] == str(history is not None)
+        if history:
+            assert history["window_end_seconds"] <= case["test_start_s"]
+            assert history["last_arrival_ms"] < case["test_start_s"] * 1000
+            assert row["history_sha256"] == history["output_sha256"]
+            assert row["history_input_file"] != row["input_file"]
+            assert row["history_scale_factor"] == "1"
+            assert "rollouts/validation not defined" in row["rl_training_split"]
+        else:
+            assert row["rl_training_split"] == "Held-out evaluation"
         assert int(row["static_warmup_s"]) == 0
         assert (
             float(row["test_duration_s"]) == case["test_end_s"] - case["test_start_s"]

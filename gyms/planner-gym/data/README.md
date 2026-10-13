@@ -17,6 +17,11 @@ Run the versioned suite in `../configs/60traces/suite.yaml` from the Gym root.
 For all source windows, planned history, case sizes and experiment assignments,
 see [the inventory](../docs/traces-60.md).
 
+Separate earlier history lives at `60traces/training/<source>/history-1x.jsonl`
+with a checksum/provenance sidecar for each file. These are five unscaled
+sources for training, separate from the 60 expanded test cases. See
+[training history](../docs/training-history.md) for splits and usage.
+
 ## Reconstruct inputs
 
 Place the supplied reproduction package at `data/60traces/reproduction/` and

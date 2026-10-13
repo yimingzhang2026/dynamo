@@ -1,0 +1,184 @@
+{
+  "ragpulse": {
+    "source": {
+      "source_uri": "https://github.com/flashserve/RAGPulse/tree/7da286becf0f049b2bcb1e5a11d9ba8eb638eff4",
+      "block_size": 64,
+      "hash_kind": "opaque_component_approximation",
+      "revision": "7da286becf0f049b2bcb1e5a11d9ba8eb638eff4"
+    },
+    "history_start_s": 0,
+    "history_end_s": 345600,
+    "helper_sha256": "2591837152e57ea3bb4825123cd4a88e770f18974d30d77ad456f3330008f1b7",
+    "assets": [
+      {
+        "file": "0_trace.jsonl",
+        "sha256": "017b54972ba3c6c4d52c6cc6967f4168630c381ac58a3b5625a45e795ffa13fa",
+        "bytes": 9961760,
+        "url": "https://raw.githubusercontent.com/flashserve/RAGPulse/7da286becf0f049b2bcb1e5a11d9ba8eb638eff4/data/0_trace.jsonl"
+      },
+      {
+        "file": "1_sys_prompt.jsonl",
+        "sha256": "a7e9b8704b8991359ca7183a3378c6822798ab005ea7a6dbd3b3655d6765ca72",
+        "bytes": 1399484,
+        "url": "https://raw.githubusercontent.com/flashserve/RAGPulse/7da286becf0f049b2bcb1e5a11d9ba8eb638eff4/data/1_sys_prompt.jsonl"
+      },
+      {
+        "file": "2_passages.jsonl",
+        "sha256": "9c9a3cb237f6689755b89a80cfc3a724f9b49e303d339efe8ed9fce6ca07617e",
+        "bytes": 352301,
+        "url": "https://raw.githubusercontent.com/flashserve/RAGPulse/7da286becf0f049b2bcb1e5a11d9ba8eb638eff4/data/2_passages.jsonl"
+      },
+      {
+        "file": "3_history.jsonl",
+        "sha256": "e227c583bdf7ddaf98c8be18c0e57507487d7c9d02e5b4b9bb1948cccc733b30",
+        "bytes": 1431176,
+        "url": "https://raw.githubusercontent.com/flashserve/RAGPulse/7da286becf0f049b2bcb1e5a11d9ba8eb638eff4/data/3_history.jsonl"
+      },
+      {
+        "file": "4_user_input.jsonl",
+        "sha256": "b2e62e40262774b61be5341ca11fed7a32562fdcb5b614827406f64c2cb5f914",
+        "bytes": 1333068,
+        "url": "https://raw.githubusercontent.com/flashserve/RAGPulse/7da286becf0f049b2bcb1e5a11d9ba8eb638eff4/data/4_user_input.jsonl"
+      },
+      {
+        "file": "5_web_search.jsonl",
+        "sha256": "cf9c7c548077a16262cac0b13ef4260b4934cc544caef633b09e1475dbde42c6",
+        "bytes": 291820,
+        "url": "https://raw.githubusercontent.com/flashserve/RAGPulse/7da286becf0f049b2bcb1e5a11d9ba8eb638eff4/data/5_web_search.jsonl"
+      }
+    ]
+  },
+  "azure-2024-code": {
+    "source": {
+      "source_files": [
+        {
+          "id": "azure-2024-code",
+          "url": "https://github.com/Azure/AzurePublicDataset/releases/download/dataset-llm-2024/AzureLLMInferenceTrace_code_1week.csv",
+          "bytes": 691989454,
+          "sha256": "71de5c55cbc35f8f1ed0b6b7806b4cd1e9764b0058469725a6aac98023a1448f",
+          "release": "dataset-llm-2024",
+          "readme_revision": "215becdacba1ce682c7368642ce97d5a332de7a6",
+          "license": "CC-BY (repository release)",
+          "citation": "Stojkovic et al., DynamoLLM: Designing LLM Inference Clusters for Performance and Energy Efficiency, HPCA 2025.",
+          "file": "AzureLLMInferenceTrace_code_1week.csv"
+        }
+      ],
+      "block_size": 64,
+      "source_uri": "https://github.com/Azure/AzurePublicDataset/blob/215becdacba1ce682c7368642ce97d5a332de7a6/AzureLLMInferenceDataset2024.md",
+      "full_trace_requests": 16803695,
+      "full_trace_duration_seconds": 604799.919571,
+      "full_trace_first_timestamp": 0,
+      "hash_kind": "unique_opaque_per_request"
+    },
+    "history_start_s": 0,
+    "history_end_s": 345600
+  },
+  "azure-2024-conv": {
+    "source": {
+      "source_files": [
+        {
+          "id": "azure-2024-conv",
+          "url": "https://github.com/Azure/AzurePublicDataset/releases/download/dataset-llm-2024/AzureLLMInferenceTrace_conv_1week.csv",
+          "bytes": 1135195393,
+          "sha256": "a0cc9b969a9bbf0fd811802cbf4323edd3a209ace791e3799ad4f9207f213941",
+          "release": "dataset-llm-2024",
+          "readme_revision": "215becdacba1ce682c7368642ce97d5a332de7a6",
+          "license": "CC-BY (repository release)",
+          "citation": "Stojkovic et al., DynamoLLM: Designing LLM Inference Clusters for Performance and Energy Efficiency, HPCA 2025.",
+          "file": "AzureLLMInferenceTrace_conv_1week.csv"
+        }
+      ],
+      "block_size": 64,
+      "source_uri": "https://github.com/Azure/AzurePublicDataset/blob/215becdacba1ce682c7368642ce97d5a332de7a6/AzureLLMInferenceDataset2024.md",
+      "full_trace_requests": 27303999,
+      "full_trace_duration_seconds": 604799.994297,
+      "full_trace_first_timestamp": 0,
+      "hash_kind": "unique_opaque_per_request"
+    },
+    "history_start_s": 0,
+    "history_end_s": 345600
+  },
+  "burstgpt-3": {
+    "source": {
+      "source_files": [
+        {
+          "file": "BurstGPT_without_fails_3.csv",
+          "bytes": 217312026,
+          "sha256": "3326259f9efb11845bc5ef85fa97e6f691050b0974621c91ef22acd566c43a40",
+          "url": "https://github.com/HPMLL/BurstGPT/releases/download/v2.0/BurstGPT_without_fails_3.csv"
+        }
+      ],
+      "block_size": 64,
+      "source_uri": "https://github.com/HPMLL/BurstGPT/releases/tag/v2.0",
+      "full_trace_requests": 4956058,
+      "full_trace_duration_seconds": 9503873.0,
+      "full_trace_first_timestamp": 19440110.0,
+      "hash_kind": "unique_opaque_per_request"
+    },
+    "history_start_s": 0,
+    "history_end_s": 604800
+  },
+  "art-chat": {
+    "source": {
+      "source_uri": "https://huggingface.co/datasets/alessiotoniolo/ART-Chat-2.5M/tree/f4c33055082ab86a4f49b521c2400c61d0e86f6c",
+      "block_size": 256,
+      "hash_kind": "native_block_hash",
+      "revision": "f4c33055082ab86a4f49b521c2400c61d0e86f6c",
+      "file": "20260405.parquet",
+      "full_trace_first_timestamp": 0,
+      "full_trace_requests": 2525215
+    },
+    "history_start_s": 0,
+    "history_end_s": 345600,
+    "assets": [
+      {
+        "url": "https://huggingface.co/datasets/alessiotoniolo/ART-Chat-2.5M/resolve/f4c33055082ab86a4f49b521c2400c61d0e86f6c/parquet/20260401.parquet",
+        "upstream_bytes": 2390057553,
+        "upstream_lfs_sha256": "05cf3a14f3b168c31a937917ec620801fe03f52a711580ecece2e26093bc1504",
+        "revision": "f4c33055082ab86a4f49b521c2400c61d0e86f6c",
+        "projection_file": "artchat-20260401-with-hashes.parquet"
+      },
+      {
+        "url": "https://huggingface.co/datasets/alessiotoniolo/ART-Chat-2.5M/resolve/f4c33055082ab86a4f49b521c2400c61d0e86f6c/parquet/20260402.parquet",
+        "upstream_bytes": 2543120849,
+        "upstream_lfs_sha256": "bdca415e07b1002c687c96bae74c9371721bb376709b46529aa2e3dd4a8b86dc",
+        "revision": "f4c33055082ab86a4f49b521c2400c61d0e86f6c",
+        "projection_file": "artchat-20260402-with-hashes.parquet"
+      },
+      {
+        "url": "https://huggingface.co/datasets/alessiotoniolo/ART-Chat-2.5M/resolve/f4c33055082ab86a4f49b521c2400c61d0e86f6c/parquet/20260403.parquet",
+        "upstream_bytes": 3628792643,
+        "upstream_lfs_sha256": "9d3deaa54982ba2dd83d4df41f81be0117eef29493a2d4648a86540369e84621",
+        "revision": "f4c33055082ab86a4f49b521c2400c61d0e86f6c",
+        "projection_file": "artchat-20260403-with-hashes.parquet"
+      },
+      {
+        "url": "https://huggingface.co/datasets/alessiotoniolo/ART-Chat-2.5M/resolve/f4c33055082ab86a4f49b521c2400c61d0e86f6c/parquet/20260404.parquet",
+        "upstream_bytes": 4338934912,
+        "upstream_lfs_sha256": "2b1e90acef431b8a970adf392091b0940adba5833886beced07d9dd970c58d11",
+        "revision": "f4c33055082ab86a4f49b521c2400c61d0e86f6c",
+        "projection_file": "artchat-20260404-with-hashes.parquet"
+      }
+    ],
+    "boundary_projection": {
+      "url": "https://huggingface.co/datasets/alessiotoniolo/ART-Chat-2.5M/resolve/f4c33055082ab86a4f49b521c2400c61d0e86f6c/parquet/20260405.parquet",
+      "full_remote_file_bytes": 4493925264,
+      "rows": 409311,
+      "row_groups": 205,
+      "columns_downloaded": [
+        "request_id",
+        "timestamp_ms",
+        "input_length",
+        "output_length",
+        "hash_ids"
+      ],
+      "messages_column_downloaded": false,
+      "projection_sha256": "b347f020d298d669eb7a2743b6caf46b9a4812f41216b422a2e7a135bcb094ae",
+      "projection_bytes": 438969851,
+      "projection_file": "artchat-20260405-with-hashes.parquet",
+      "note": "Read only rows with timestamp_ms < 345600000; the day-5 file contains one earlier boundary request excluded from the test base.",
+      "reference_projection_sha256": "97613f6379ff6d96fe3abc892faa5078868fac2226a6c3582e9cf7cb94dac6e0",
+      "projection_note": "Local PyArrow projection encoding; this projection produced the SHA-256-verified canonical day-5 test input."
+    }
+  }
+}

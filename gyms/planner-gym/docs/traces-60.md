@@ -34,15 +34,21 @@ meeting the case's latency objectives, normalized by GPU usage. The groups
 change engine parallelism, latency targets and calibrated input scale, so a
 cross-group difference is not an isolated measurement of topology alone.
 
-There is no randomized 80/20 split and no implemented RL train/validation/test
-split. The planned history is for a future workload predictor: RAGPulse, Azure
-and ART use days 1–4 as history and day 5 as test; BurstGPT uses days 1–7 as
-history and days 8–14 as test. Qwen and Mooncake use their full short trace for
-test and have no separate history. These history windows have not been
-materialized as training files by the static preparation scripts. All 60
-prepared files contain test traffic only, and each current config uses 0 s
-warmup. Training or tuning on these test windows would make their evaluation
-in-sample; choose a separate validation protocol before training an RL policy.
+Separate unscaled training-history files are now prepared for five sources.
+RAGPulse, Azure Code, Azure Conversation and ART use days 1–4 as history and
+day 5 as test; BurstGPT uses days 1–7 as history and days 8–14 as test.
+Qwen and Mooncake remain held-out: their full short traces are test inputs
+and have no independent history in this package. The five histories can be
+used for training a shared policy evaluated on these held-out sources.
+The CSV includes each case's history path, request count, size and checksum.
+
+History files contain workload traffic at the original 1x rate, shared by
+cases using that source; they are not 60 separately scaled training inputs.
+All 60 expanded benchmark files still contain test traffic only, and each
+static config uses 0 s warmup. Offline RL still needs training rollouts with
+states/actions/rewards and a validation interval reserved within history.
+Training or tuning on the test windows would make evaluation in-sample.
+See training-history.md for preparation commands and the training workflow.
 
 Duration means the offered trace window, not simulation wall time. Source
 windows are relative to each source's origin; generated test timestamps are
@@ -56,7 +62,7 @@ ratio or an arrival-speedup setting.
 
 ## Source test intervals
 
-| Source | Test window | Duration | Planned predictor history | Base requests | Base MB |
+| Source | Test window | Duration | Earlier history window | Base requests | Base MB |
 |---|---|---:|---|---:|---:|
 | ART-Chat-2.5M | Day 5 | 24 h | Days 1–4 (4 days) | 409,310 | 297.959160 |
 | Azure 2024 Code | Day 5 | 24 h | Days 1–4 (4 days) | 3,210,786 | 1620.765027 |
@@ -70,7 +76,7 @@ ratio or an arrival-speedup setting.
 | Qwen-Bailian To-C | Entire trace | 7199.464 s | None (0) | 43,058 | 51.919647 |
 | RAGPulse | Day 5 | 24 h | Days 1–4 (4 days) | 1,050 | 0.522343 |
 
-History keys below: **H1** = days 1–4 planned history, day 5 test; **H2** = days 1–7 planned history, days 8–14 test; **H0** = no history, entire trace used for test. None is a materialized RL training split.
+History keys below: **H1** = days 1–4 prepared history, day 5 test; **H2** = days 1–7 prepared history, days 8–14 test; **H0** = held-out source, entire trace used for test. Histories are unscaled traffic, not collected RL transitions. See [training history](training-history.md) for exact sizes and paths.
 
 ## A-HT: Aggregated / high throughput
 

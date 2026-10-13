@@ -41,8 +41,10 @@ Native replay also requires compatible Dynamo bindings and AISimulate; see
 Copy a baseline config to a separate experiment directory before enabling a
 planner. Adjust relative input/output paths, calibrate the planner for the
 case's model and hardware, and train a compatible RL checkpoint when needed.
-All baseline cases currently use zero warmup. Planned predictor-history windows
-are documented in the inventory; training inputs have not been materialized.
+All baseline cases currently use zero warmup. Separate earlier traffic for
+training is prepared under `data/60traces/training/<source>/history-1x.jsonl`.
+See [training history](docs/training-history.md) for the five sources, exact
+splits, reconstruction commands and how to use them for planner training.
 
 Generic trace parsing, generation primitives, autoscalers and runner tests remain
 available. Benchmark cases use explicit trace paths; the optional user workload
