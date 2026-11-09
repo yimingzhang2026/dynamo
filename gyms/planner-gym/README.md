@@ -15,6 +15,66 @@ Static holds it fixed. Dynamic planners have a minimum of one worker per active
 pool and no independent worker-count cap. Starting and draining workers count
 against the shared ceiling.
 
+## Saved results
+
+The `efficiency-plus3-20261106` campaign has **360/360 completed results**:
+six planners on 30 aggregated and 30 disaggregated traces. These tables are a
+snapshot of [leaderboard-summary.csv](leaderboards/60traces/leaderboard-summary.csv),
+using the `all` regime for each topology.
+
+Planners are ranked within each trace by **goodput per average simulated GPU**
+(higher is better), then ordered by **mean rank** across traces (lower is better).
+Each trace has equal weight. Ties share rank and win credit, so wins can be
+fractional. Mean good rate is the average per-trace fraction of attempted
+requests meeting the configured SLOs; it is not the ranking metric. GPU-hours
+are summed simulated serving allocations, excluding the physical GPUs used
+for KnowLine decision inference. These are the main efficiency rankings;
+the HTML report also includes separate SLO-adjusted rankings and latency diagnostics.
+
+### Aggregated serving — 30 traces
+
+Every planner completed all 30 traces; all 30 enter the comparison.
+
+| Position | Planner | Mean rank ↓ | Wins ↑ | Mean good rate ↑ | Simulated GPU-hours |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | KnowLine-31B | 2.467 | 5.00 | 58.26% | 20,011.3 |
+| 2 | cloudAI-MPC | 2.700 | 7.50 | 57.32% | 18,719.4 |
+| 3 | Static | 2.733 | 10.50 | 63.93% | 27,718.9 |
+| 4 | Dynamo | 3.733 | 5.00 | 81.57% | 30,488.8 |
+| 5 | KEDA | 4.500 | 0.00 | 28.46% | 13,084.4 |
+| 6 | Reactive | 4.867 | 2.00 | 21.26% | 10,952.0 |
+
+### Disaggregated serving — 30 traces
+
+Every planner completed all 30 traces; all 30 enter the comparison.
+
+| Position | Planner | Mean rank ↓ | Wins ↑ | Mean good rate ↑ | Simulated GPU-hours |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | cloudAI-MPC | 2.483 | 12.00 | 76.74% | 18,802.0 |
+| 2 | Dynamo | 3.017 | 6.50 | 62.30% | 15,490.7 |
+| 3 | KnowLine-31B | 3.333 | 2.00 | 79.78% | 23,525.8 |
+| 4 | Static | 3.433 | 5.83 | 65.53% | 23,897.4 |
+| 5 | Reactive | 3.967 | 2.33 | 61.60% | 19,162.5 |
+| 6 | KEDA | 4.767 | 1.33 | 64.09% | 21,337.6 |
+
+Per-trace results: [aggregated CSV](leaderboards/60traces/aggregated-runs.csv)
+and [disaggregated CSV](leaderboards/60traces/disaggregated-runs.csv).
+The [summary CSV](leaderboards/60traces/leaderboard-summary.csv) also includes
+separate HT and LC results. See [report details](leaderboards/60traces/README.md)
+for scoring and validation.
+
+### Open the interactive HTML report
+
+The full [HTML leaderboard](leaderboards/60traces/index.html) is committed to
+this branch. GitHub's repository file viewer shows HTML source; it does not
+run the interactive dashboard inside the README.
+
+To use the tabs, filters, latency matrices, and diagnostic dialogs, open
+`leaderboards/60traces/index.html` from a local checkout in your browser.
+Alternatively, follow the HTML link above, select **Download raw file** in
+GitHub's file toolbar, and open the downloaded file. The report is self-contained
+and works offline; no benchmark rerun or server is needed.
+
 ## Rebuild the saved tables
 
 Python 3.11 or 3.12 is sufficient; replay and GPU inference are unnecessary.
@@ -34,10 +94,12 @@ python leaderboards/60traces/build_leaderboards.py --check
 See [reproducibility](docs/reproducibility.md) for the input/runtime pins and the
 distinction between rebuilding these results and repeating model inference.
 
-Open [leaderboards/60traces/index.html](leaderboards/60traces/index.html).
+Open the generated `leaderboards/60traces/index.html` locally as described above.
 The generator also writes topology tables, latency/SLO matrices, SLO-adjusted
 rankings, JSON, and CSV exports.
 [Report details](leaderboards/60traces/README.md) describe the scoring and inputs.
+The README tables above are a saved snapshot; when publishing a new campaign,
+refresh them from the `all` rows in `leaderboard-summary.csv`.
 
 ## Resources
 

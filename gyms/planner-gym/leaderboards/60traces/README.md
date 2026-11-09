@@ -5,6 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 
 # 60-trace results and analysis
 
+**[View the results tables in the Planner Gym README](../../README.md#saved-results).**
+They render directly on GitHub, with aggregated and disaggregated rankings for
+all six planners.
+
+For the interactive dashboard, open [index.html](index.html) from a local
+checkout, or use GitHub's **Download raw file** button and open the saved file
+in your browser. GitHub's repository file viewer displays HTML source rather
+than running the dashboard. The downloaded report works offline without a server.
+
 Run `python build_leaderboards.py` to regenerate the five standalone pages:
 `index.html`, `aggregated.html`, `disaggregated.html`, `latency.html`,
 and `slo-rankings.html`. They work offline.
