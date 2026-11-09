@@ -138,3 +138,7 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+# Python bindings are a separate Cargo workspace; use the same scheduler fix.
+[patch.crates-io]
+aisimulate-core = { path = "../../../vendor/aisimulate-core" }

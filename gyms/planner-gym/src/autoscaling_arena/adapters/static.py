@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Static (fixed-count) autoscaler — the continuity baseline.
+"""Static autoscaler: hold the configured baseline fleet for the entire run.
 
-Holds a constant replica count for the whole run; it never reacts. This is the
-"best static config" the project has historically compared the Planner against,
-brought behind the common adapter interface so it ranks on the same board as
-every reactive autoscaler.
+The benchmark supplies each case's original worker counts. The adapter makes
+no demand-dependent changes to that fleet.
 
 It is an ``EngineProtocol`` implementation (structural — no inheritance needed):
 the replay harness drives ``initial_tick`` / ``tick`` / ``shutdown`` and routes

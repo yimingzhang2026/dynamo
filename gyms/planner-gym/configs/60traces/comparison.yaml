@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Source for scripts/prepare_comparison.py; this is not a Match Config.
+# Static and initial fleets stay fixed; all planners share this per-case ceiling.
+resources:
+  # Maximum = original Static GPUs + this count × the largest worker's GPU cost.
+  gpu_budget_extra_workers: 3
+planners: [mpc, planner, keda, reactive, static, knowline31b]
+timeout_s: 259200
+knowline:
+  provider: self_hosted
+  model: PelaAI/KnowLine-31B-Gen1
+  revision: 8f052a8130e599b53e5324c34f0f5ff90696e1c6
+  base_url: http://127.0.0.1:18080
+  timeout_s: 180
+  max_calls: 1000000
+  poll_interval_s: 15
+  failure_mode: raise
+parallel:
+  physical_cores: 8
+  memory_gib: 512
+  reserve_cores: 0
+  reserve_memory_gib: 64
+  max_parallel_runs: 8
+  cores_per_run: 1
+  max_parallel_decision_models: 1
+  exclusive_at_memory_gib: 256
+  # Measured Static RSS is an estimate, not a dynamic-run guarantee.
+  memory_multiplier: 2
+  extra_memory_gib: 2
+  minimum_memory_gib: 8
+  thread_environment:
+    OMP_NUM_THREADS: '1'
+    OPENBLAS_NUM_THREADS: '1'
+    MKL_NUM_THREADS: '1'
+    NUMEXPR_NUM_THREADS: '1'
+    VECLIB_MAXIMUM_THREADS: '1'
+    RAYON_NUM_THREADS: '1'
+    TOKIO_WORKER_THREADS: '1'

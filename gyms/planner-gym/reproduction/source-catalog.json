@@ -1,0 +1,171 @@
+{
+  "mooncake-conversation": {
+    "source_files": [
+      {
+        "file": "mooncake-conversation.jsonl",
+        "bytes": 3029533,
+        "sha256": "b8cbb061a85206d729d91cdc2981f43c9e0d99209dce588d3af5f7934408b9df",
+        "url": "https://raw.githubusercontent.com/kvcache-ai/Mooncake/f8b50d5f1a2fa4d33d029ed1e82188de70b137f0/FAST25-release/traces/conversation_trace.jsonl"
+      }
+    ],
+    "block_size": 512,
+    "source_uri": "https://github.com/kvcache-ai/Mooncake/blob/f8b50d5f1a2fa4d33d029ed1e82188de70b137f0/FAST25-release/traces/conversation_trace.jsonl",
+    "full_trace_requests": 12031,
+    "full_trace_duration_seconds": 3536.9990000000003,
+    "full_trace_first_timestamp": 0.0,
+    "hash_kind": "native_block_hash"
+  },
+  "mooncake-toolagent": {
+    "source_files": [
+      {
+        "file": "mooncake-toolagent.jsonl",
+        "bytes": 4415857,
+        "sha256": "48a2db1a13d3bc05e6330140c64f604ba366df20d3c9e128b5c35a01c1fa5f71",
+        "url": "https://raw.githubusercontent.com/kvcache-ai/Mooncake/f8b50d5f1a2fa4d33d029ed1e82188de70b137f0/FAST25-release/traces/toolagent_trace.jsonl"
+      }
+    ],
+    "block_size": 512,
+    "source_uri": "https://github.com/kvcache-ai/Mooncake/blob/f8b50d5f1a2fa4d33d029ed1e82188de70b137f0/FAST25-release/traces/toolagent_trace.jsonl",
+    "full_trace_requests": 23608,
+    "full_trace_duration_seconds": 3536.9990000000003,
+    "full_trace_first_timestamp": 0.0,
+    "hash_kind": "native_block_hash"
+  },
+  "mooncake-synthetic": {
+    "source_files": [
+      {
+        "file": "mooncake-synthetic.jsonl",
+        "bytes": 1136313,
+        "sha256": "bd070915a98fc0ed264d7cfef2ce746002eb3076a695ec31ba2674c0111ec131",
+        "url": "https://raw.githubusercontent.com/kvcache-ai/Mooncake/f8b50d5f1a2fa4d33d029ed1e82188de70b137f0/FAST25-release/traces/synthetic_trace.jsonl"
+      }
+    ],
+    "block_size": 512,
+    "source_uri": "https://github.com/kvcache-ai/Mooncake/blob/f8b50d5f1a2fa4d33d029ed1e82188de70b137f0/FAST25-release/traces/synthetic_trace.jsonl",
+    "full_trace_requests": 3993,
+    "full_trace_duration_seconds": 1022.025,
+    "full_trace_first_timestamp": 0.0,
+    "hash_kind": "native_block_hash"
+  },
+  "qwen-toc": {
+    "source_files": [
+      {
+        "file": "qwen_traceA_blksz_16.jsonl",
+        "bytes": 56354493,
+        "sha256": "07cedc9ed8aff301994ac68ed4aede8123b7603673575eeba9dd677de663db17",
+        "url": "https://media.githubusercontent.com/media/alibaba-edu/qwen-bailian-usagetraces-anon/5f7439c51ec248a0c585f7d90a41a6f57773b912/qwen_traceA_blksz_16.jsonl"
+      }
+    ],
+    "block_size": 16,
+    "source_uri": "https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon/blob/5f7439c51ec248a0c585f7d90a41a6f57773b912/qwen_traceA_blksz_16.jsonl",
+    "full_trace_requests": 43058,
+    "full_trace_duration_seconds": 7199.464,
+    "full_trace_first_timestamp": 0.0,
+    "hash_kind": "native_block_hash"
+  },
+  "qwen-coder": {
+    "source_files": [
+      {
+        "file": "qwen_coder_blksz_16.jsonl",
+        "bytes": 132054902,
+        "sha256": "3d74974cebb7bccb69b1ca6ea210a44d9a3033443c0271ed015327284dea1aff",
+        "url": "https://media.githubusercontent.com/media/alibaba-edu/qwen-bailian-usagetraces-anon/5f7439c51ec248a0c585f7d90a41a6f57773b912/qwen_coder_blksz_16.jsonl"
+      }
+    ],
+    "block_size": 16,
+    "source_uri": "https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon/blob/5f7439c51ec248a0c585f7d90a41a6f57773b912/qwen_coder_blksz_16.jsonl",
+    "full_trace_requests": 43011,
+    "full_trace_duration_seconds": 7198.879,
+    "full_trace_first_timestamp": 0.0,
+    "hash_kind": "native_block_hash"
+  },
+  "qwen-thinking": {
+    "source_files": [
+      {
+        "file": "qwen_thinking_blksz_16.jsonl",
+        "bytes": 27901454,
+        "sha256": "41ac36d9d1b54d084eeb6b05e9d142ba9d02f8bf79cfc9fff418d8ab7cdee906",
+        "url": "https://media.githubusercontent.com/media/alibaba-edu/qwen-bailian-usagetraces-anon/5f7439c51ec248a0c585f7d90a41a6f57773b912/qwen_thinking_blksz_16.jsonl"
+      }
+    ],
+    "block_size": 16,
+    "source_uri": "https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon/blob/5f7439c51ec248a0c585f7d90a41a6f57773b912/qwen_thinking_blksz_16.jsonl",
+    "full_trace_requests": 10812,
+    "full_trace_duration_seconds": 7191.734,
+    "full_trace_first_timestamp": 0.0,
+    "hash_kind": "native_block_hash"
+  },
+  "burstgpt-3": {
+    "source_files": [
+      {
+        "file": "BurstGPT_without_fails_3.csv",
+        "bytes": 217312026,
+        "sha256": "3326259f9efb11845bc5ef85fa97e6f691050b0974621c91ef22acd566c43a40",
+        "url": "https://github.com/HPMLL/BurstGPT/releases/download/v2.0/BurstGPT_without_fails_3.csv"
+      }
+    ],
+    "block_size": 64,
+    "source_uri": "https://github.com/HPMLL/BurstGPT/releases/tag/v2.0",
+    "full_trace_requests": 4956058,
+    "full_trace_duration_seconds": 9503873.0,
+    "full_trace_first_timestamp": 19440110.0,
+    "hash_kind": "unique_opaque_per_request"
+  },
+  "azure-2024-code": {
+    "source_files": [
+      {
+        "id": "azure-2024-code",
+        "url": "https://github.com/Azure/AzurePublicDataset/releases/download/dataset-llm-2024/AzureLLMInferenceTrace_code_1week.csv",
+        "bytes": 691989454,
+        "sha256": "71de5c55cbc35f8f1ed0b6b7806b4cd1e9764b0058469725a6aac98023a1448f",
+        "release": "dataset-llm-2024",
+        "readme_revision": "215becdacba1ce682c7368642ce97d5a332de7a6",
+        "license": "CC-BY (repository release)",
+        "citation": "Stojkovic et al., DynamoLLM: Designing LLM Inference Clusters for Performance and Energy Efficiency, HPCA 2025.",
+        "file": "AzureLLMInferenceTrace_code_1week.csv"
+      }
+    ],
+    "block_size": 64,
+    "source_uri": "https://github.com/Azure/AzurePublicDataset/blob/215becdacba1ce682c7368642ce97d5a332de7a6/AzureLLMInferenceDataset2024.md",
+    "full_trace_requests": 16803695,
+    "full_trace_duration_seconds": 604799.919571,
+    "full_trace_first_timestamp": 0,
+    "hash_kind": "unique_opaque_per_request"
+  },
+  "azure-2024-conv": {
+    "source_files": [
+      {
+        "id": "azure-2024-conv",
+        "url": "https://github.com/Azure/AzurePublicDataset/releases/download/dataset-llm-2024/AzureLLMInferenceTrace_conv_1week.csv",
+        "bytes": 1135195393,
+        "sha256": "a0cc9b969a9bbf0fd811802cbf4323edd3a209ace791e3799ad4f9207f213941",
+        "release": "dataset-llm-2024",
+        "readme_revision": "215becdacba1ce682c7368642ce97d5a332de7a6",
+        "license": "CC-BY (repository release)",
+        "citation": "Stojkovic et al., DynamoLLM: Designing LLM Inference Clusters for Performance and Energy Efficiency, HPCA 2025.",
+        "file": "AzureLLMInferenceTrace_conv_1week.csv"
+      }
+    ],
+    "block_size": 64,
+    "source_uri": "https://github.com/Azure/AzurePublicDataset/blob/215becdacba1ce682c7368642ce97d5a332de7a6/AzureLLMInferenceDataset2024.md",
+    "full_trace_requests": 27303999,
+    "full_trace_duration_seconds": 604799.994297,
+    "full_trace_first_timestamp": 0,
+    "hash_kind": "unique_opaque_per_request"
+  },
+  "art-chat": {
+    "source_uri": "https://huggingface.co/datasets/alessiotoniolo/ART-Chat-2.5M/tree/f4c33055082ab86a4f49b521c2400c61d0e86f6c",
+    "block_size": 256,
+    "hash_kind": "native_block_hash",
+    "revision": "f4c33055082ab86a4f49b521c2400c61d0e86f6c",
+    "file": "20260405.parquet",
+    "full_trace_first_timestamp": 0,
+    "full_trace_requests": 2525215
+  },
+  "ragpulse": {
+    "source_uri": "https://github.com/flashserve/RAGPulse/tree/7da286becf0f049b2bcb1e5a11d9ba8eb638eff4",
+    "block_size": 64,
+    "hash_kind": "opaque_component_approximation",
+    "revision": "7da286becf0f049b2bcb1e5a11d9ba8eb638eff4"
+  }
+}

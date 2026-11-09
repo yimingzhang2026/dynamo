@@ -1,0 +1,3753 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+mod bounded;
+mod feedback;
+pub use feedback::CompletionFeedbackSnapshot;
+
+use ddsketchy::DDSketch;
+use rustc_hash::FxHashMap;
+use serde::Serialize;
+use serde::ser::{SerializeMap, Serializer};
+use serde_json::Value;
+use std::fmt::{Display, Formatter, Result as FmtResult};
+use uuid::Uuid;
+
+use crate::engine::{CacheTierAttribution, TtftMilestone};
+use crate::replay::loadgen::{
+    AgenticGraphIdentity, AgenticLifecycleTranscript, AgenticPhaseEvidence, AgenticPlayOutcome,
+    AgenticReplayPhase, AgenticSnapshotEvidence, AgenticTrajectorySnapshot,
+};
+use crate::replay::{AgenticRuntimeIdentity, PlacementCacheSample};
+
+// 0.1% relative quantile error. The enlarged store covers latency/rate values
+// spanning roughly 10^28 within one sign while remaining bounded (~512 KiB for
+// the two stores at their maximum size, ~1 MiB for both global sketches).
+const DDSKETCH_RELATIVE_ACCURACY: f64 = 0.001;
+const DDSKETCH_MAX_BINS: usize = 32_768;
+
+/// Match AIC's fail-closed publication gate for modeled power.
+pub const POWER_DATA_COVERAGE_THRESHOLD: f64 = 0.9;
+
+/// Final gauges of one cluster-shared G2 pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct G2DomainStats {
+    pub capacity_blocks: usize,
+    pub resident_blocks: usize,
+    /// Resident blocks plus pending store/promotion destinations.
+    pub used_blocks: usize,
+}
+
+/// Canonical replay result returned by [`crate::replay::Replayer`].
+#[derive(Debug, Clone)]
+pub struct ReplayReport {
+    pub kv_eviction_policy: crate::engine::KvEvictionPolicy,
+    /// Versioned forecast contract, present only for a lookahead eviction policy.
+    pub kv_eviction_assumption: Option<&'static str>,
+    /// Prefill tokens in completed, committed forward passes, including
+    /// recomputation. This is measured from native pass metrics, not inferred
+    /// from cache reuse ratios; an unfinished pass at a replay cutoff is excluded.
+    pub committed_prefill_tokens: u64,
+    pub g3_offload: Option<crate::engine::G3Stats>,
+    /// Pulls of the pool that configures `kvcr`: aggregated, or prefill in P/D.
+    pub kvcr: Option<crate::engine::KvcrStats>,
+    /// Cluster-shared G2 pools; private G2 caches are not listed.
+    pub g2_domains: Vec<G2DomainStats>,
+    pub request_counts: TraceRequestCounts,
+    pub throughput: TraceThroughputStats,
+    pub prefix_cache_reused_ratio: f64,
+    pub first_admission_prefix_cache_reused_ratio: f64,
+    pub latency: TraceLatencyStats,
+    pub trajectories: Option<TraceTrajectoryStats>,
+    pub agentic_graph: Option<AgenticGraphIdentity>,
+    /// Source-clock snapshot preparation, separate from actual execution events.
+    pub agentic_snapshots: Option<Vec<AgenticSnapshotEvidence>>,
+    /// Preparation is audited separately from the profile measurements.
+    pub agentic_phases: Option<AgenticPhaseEvidence>,
+    /// Fixed-duration admission, idle, and client/server completion evidence.
+    pub agentic_profile: Option<crate::replay::loadgen::AgenticProfileReport>,
+    /// Canonical driver lifecycle evidence on the absolute runtime clock. The
+    /// compact JSON report publishes only its digest and event count;
+    /// conformance tests can inspect all events.
+    pub agentic_lifecycle: Option<AgenticLifecycleTranscript>,
+    /// One explicit completed, failed, or incomplete result per authored play.
+    /// Timestamps share the measured per-request clock (relative to the profile
+    /// barrier when preparation succeeded).
+    pub agentic_play_outcomes: Option<Vec<AgenticPlayOutcome>>,
+    /// SLA-goodput stats. `Some` only when an SLA was supplied to the collector
+    /// (via `set_sla_thresholds`); `None` otherwise — goodput is undefined
+    /// without an SLA, so the `goodput_*` keys are omitted from the report.
+    pub goodput: Option<TraceGoodputStats>,
+    /// Modeled forward-pass power per GPU. Present only when the selected
+    /// timing provider exposes power evidence. `power_w` is null below
+    /// AIC's latency-weighted coverage threshold while `coverage` explains
+    /// why the estimate was withheld.
+    pub power: Option<TracePowerStats>,
+    /// Complete typed operation-energy diagnostics for bindings and direct
+    /// Rust consumers. `None` means the caller did not request or attach
+    /// diagnostics; an attached payload carries its own availability status.
+    pub power_diagnostics: Option<ReplayPowerDiagnostics>,
+    /// Per-request records, one per admitted request. Populated by
+    /// `TraceCollector::finish`. Intentionally NOT serialized into the summary
+    /// JSON (see custom `Serialize` impl below) — consumers that want per-
+    /// request granularity should access this field directly and serialize it
+    /// themselves.
+    pub per_request: Vec<PerRequestRecord>,
+    /// Execution-owned planner/lifecycle/pressure evidence. This is excluded
+    /// from the compact summary serializer and consumed explicitly by
+    /// canonical-report and planner adapters.
+    pub runtime_evidence: crate::replay::OfflineRuntimeEvidence,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceRequestCounts {
+    pub num_requests: usize,
+    pub completed_requests: usize,
+    pub total_input_tokens: usize,
+    pub total_output_tokens: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceThroughputStats {
+    pub duration_ms: f64,
+    pub wall_time_ms: f64,
+    pub request_throughput_rps: f64,
+    pub input_throughput_tok_s: f64,
+    pub output_throughput_tok_s: f64,
+    pub total_throughput_tok_s: f64,
+    /// Provisioned worker-time per role, in **worker-seconds**: the time-integral
+    /// of the *provisioned* worker count over the whole simulated run. The
+    /// provisioned count is every worker physically holding a GPU (active +
+    /// starting-up + draining), so this captures the startup ramp and the
+    /// scale-down drain tail, unlike a snapshot of the active/serving count.
+    /// Populated on the collector by the runtime: `add_worker_seconds` accrues
+    /// the integral each clock advance (agg / disagg), and
+    /// `set_static_worker_count` covers externally clocked runtimes that do not
+    /// integrate worker counts on each clock advance; 0.0 otherwise.
+    /// Multiply by GPUs-per-worker for GPU-seconds (/3600 for GPU-hours).
+    /// Aggregated replay reports through `decode_worker_seconds`, leaving
+    /// `prefill_worker_seconds` at 0.0.
+    pub prefill_worker_seconds: f64,
+    pub decode_worker_seconds: f64,
+    /// GPUs per worker per role: TP × attention DP × prefill CP, set by the
+    /// runtime. Decode CP partitions TP ranks and adds no GPUs. 0 when not set.
+    pub prefill_gpus_per_worker: usize,
+    pub decode_gpus_per_worker: usize,
+    /// GPUs of the static encoder pool ahead of the language workers; 0 without one.
+    pub encoder_gpus: usize,
+    /// GPU-hours = Σ_role `worker_seconds × gpus_per_worker / 3600` plus the
+    /// encoder pool's GPU-seconds `/ 3600`, integrated on the same clock as the
+    /// worker-seconds — the deployment's provisioned GPU-time (already
+    /// including the startup ramp and drain tail, since `*_worker_seconds` do).
+    /// Computed in `finish()` straight from the mocker's own worker
+    /// parallelism, so it needs no external config.
+    pub gpu_hours: f64,
+}
+
+/// Goodput: throughput restricted to the requests that satisfy the SLA. Present
+/// on the report only when an SLA was supplied to the collector (goodput is
+/// undefined without one). A completed request counts as "good" when it meets
+/// the configured SLA thresholds.
+#[derive(Debug, Clone)]
+pub struct TraceGoodputStats {
+    /// Completed requests that satisfied the SLA.
+    pub completed_requests: usize,
+    /// Good requests per second, over the simulated `duration_s`.
+    pub request_throughput_rps: f64,
+    /// Output tokens from good requests per second, over `duration_s`.
+    pub output_throughput_tok_s: f64,
+}
+
+/// Replay-level power summary derived from timing-provider energy evidence.
+///
+/// External callers construct validated values and cannot mutate their fields:
+///
+/// ```compile_fail
+/// use aisimulate_core::replay::TracePowerStats;
+/// let mut power = TracePowerStats::new(Some(500.0), 1.0).unwrap();
+/// power.coverage = 0.1;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TracePowerStats {
+    /// Active forward-pass average power per GPU, in watts. `None` means the
+    /// publication conditions did not all hold. JSON always includes this field.
+    pub(crate) power_w: Option<f64>,
+    /// Latency-weighted fraction of modeled forward-pass work with positive
+    /// measured energy, in `[0, 1]`.
+    pub(crate) coverage: f64,
+}
+
+/// Complete replay power diagnostics shared by Rust and serialized bindings.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReplayPowerDiagnostics {
+    pub schema_version: &'static str,
+    pub scope: &'static str,
+    pub power_w_unit: &'static str,
+    pub energy_unit: &'static str,
+    pub latency_unit: &'static str,
+    pub coverage_gate: f64,
+    pub publication_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub energy_wms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_latency_ms: Option<f64>,
+    pub power_w: Option<f64>,
+    pub power_coverage: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<&'static str>,
+    pub phases: Vec<ReplayPhasePowerDiagnostics>,
+}
+
+/// Per-phase operation-energy diagnostics.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReplayPhasePowerDiagnostics {
+    pub name: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub energy_wms: Option<f64>,
+    pub latency_ms: f64,
+    pub covered_latency_ms: f64,
+    pub power_coverage: f64,
+    pub publication_status: &'static str,
+    pub power_w: Option<f64>,
+    pub source: String,
+    pub source_kind: &'static str,
+    pub operations: Vec<ReplayOperationPowerDiagnostics>,
+}
+
+/// Per-operation energy evidence and provenance.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReplayOperationPowerDiagnostics {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub energy_wms: Option<f64>,
+    pub latency_ms: f64,
+    pub covered_latency_ms: f64,
+    pub power_coverage: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub energy_contribution: Option<f64>,
+    pub source: String,
+    pub source_kind: &'static str,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uncovered_reason: Option<&'static str>,
+}
+
+impl TracePowerStats {
+    /// Validate finite values and the inclusive power publication threshold.
+    pub fn new(power_w: Option<f64>, coverage: f64) -> anyhow::Result<Self> {
+        let stats = Self { power_w, coverage };
+        stats.validate()?;
+        Ok(stats)
+    }
+
+    /// Active forward-pass watts per GPU, or `None` when publication is withheld.
+    pub fn power_w(&self) -> Option<f64> {
+        self.power_w
+    }
+
+    /// Latency-weighted energy-evidence coverage, in `[0, 1]`.
+    pub fn coverage(&self) -> f64 {
+        self.coverage
+    }
+
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.coverage.is_finite() && (0.0..=1.0).contains(&self.coverage),
+            "/summary/power_coverage must be finite and in [0, 1]"
+        );
+        if let Some(watts) = self.power_w {
+            anyhow::ensure!(
+                watts.is_finite() && watts > 0.0,
+                "/summary/power_w must be finite and positive"
+            );
+            anyhow::ensure!(
+                self.coverage >= POWER_DATA_COVERAGE_THRESHOLD,
+                "/summary/power_w requires power_coverage >= 0.9"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceDistributionStats {
+    pub mean_ms: f64,
+    pub min_ms: f64,
+    pub max_ms: f64,
+    pub median_ms: f64,
+    pub p75_ms: f64,
+    pub p90_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub std_ms: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceLatencyStats {
+    pub num_ttft_samples: usize,
+    pub num_tpot_samples: usize,
+    pub num_e2e_latency_samples: usize,
+    pub ttft: TraceDistributionStats,
+    pub ttst: TraceDistributionStats,
+    pub tpot: TraceDistributionStats,
+    pub itl: TraceInterTokenLatencyStats,
+    pub e2e: TraceDistributionStats,
+    pub output_token_throughput_per_user: TraceDistributionStats,
+    /// Mean time to first token split by scheduler-thread stage; present when a
+    /// host-aware engine reported stages for completed requests.
+    pub ttft_milestones: Option<TraceTtftStageStats>,
+    /// Mean arrival-to-embeddings-delivered time of the completed requests that
+    /// crossed the encoder pool; `None` without one.
+    pub encoder_latency_ms: Option<f64>,
+}
+
+/// Mean per-request time spent in each host stage on the way to the first token.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TraceTtftStageStats {
+    /// Arrival, or the encoder pool's delivery, to leaving the frontend pools;
+    /// zero without a frontend.
+    pub mean_frontend_ms: f64,
+    /// Frontend exit (or arrival) to the scheduler receiving the request.
+    pub mean_scheduler_inbox_wait_ms: f64,
+    /// Received to selected into a batch.
+    pub mean_receive_to_admit_ms: f64,
+    /// Selected to the prompt's last forward finishing on the device, of the
+    /// request's first prefill attempt; a retraction before the first token is
+    /// observed lands in `mean_result_observation_delay_ms`.
+    pub mean_prefill_elapsed_ms: f64,
+    /// Device completion to the scheduler observing the result: the KV source
+    /// hold on a prefill rank, the first token elsewhere.
+    pub mean_result_observation_delay_ms: f64,
+    /// KV handoff and the decode rank's first step on a disaggregated path;
+    /// zero when the observing scheduler emits the first token itself.
+    pub mean_handoff_to_first_token_ms: f64,
+}
+
+impl TraceTtftStageStats {
+    /// Means over `samples` requests of the per-stage sums, `None` without samples.
+    fn from_sums(sums: &[f64; 6], samples: usize) -> Option<Self> {
+        (samples > 0).then(|| {
+            let mean = |index: usize| sums[index] / samples as f64;
+            Self {
+                mean_frontend_ms: mean(0),
+                mean_scheduler_inbox_wait_ms: mean(1),
+                mean_receive_to_admit_ms: mean(2),
+                mean_prefill_elapsed_ms: mean(3),
+                mean_result_observation_delay_ms: mean(4),
+                mean_handoff_to_first_token_ms: mean(5),
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceTrajectoryStats {
+    pub total: usize,
+    pub completed: usize,
+    pub incomplete: usize,
+    pub e2e: TraceDistributionStats,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceInterTokenLatencyStats {
+    pub distribution: TraceDistributionStats,
+    pub max_ms: f64,
+}
+
+impl ReplayReport {
+    pub fn with_wall_time_ms(mut self, wall_time_ms: f64) -> Self {
+        self.throughput.wall_time_ms = wall_time_ms;
+        self
+    }
+
+    pub fn with_power(mut self, power: Option<TracePowerStats>) -> Self {
+        self.power = power;
+        self
+    }
+
+    pub fn with_power_diagnostics(
+        mut self,
+        power_diagnostics: Option<ReplayPowerDiagnostics>,
+    ) -> Self {
+        self.power_diagnostics = power_diagnostics;
+        self
+    }
+
+    pub fn processed_tokens(&self) -> usize {
+        self.request_counts.total_input_tokens + self.request_counts.total_output_tokens
+    }
+
+    pub fn processed_tokens_per_s(&self) -> f64 {
+        if self.throughput.wall_time_ms <= 0.0 {
+            return 0.0;
+        }
+        self.processed_tokens() as f64 / self.throughput.wall_time_ms * 1000.0
+    }
+
+    pub fn processed_output_tokens_per_s(&self) -> f64 {
+        if self.throughput.wall_time_ms <= 0.0 {
+            return 0.0;
+        }
+        self.request_counts.total_output_tokens as f64 / self.throughput.wall_time_ms * 1000.0
+    }
+}
+
+impl Display for ReplayReport {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        if let Some(power) = self.power {
+            power.validate().map_err(|_| std::fmt::Error)?;
+        }
+        writeln!(
+            f,
+            "  completed_requests: {}",
+            self.request_counts.completed_requests
+        )?;
+        writeln!(
+            f,
+            "  request_throughput_rps: {:.6}",
+            self.throughput.request_throughput_rps
+        )?;
+        writeln!(
+            f,
+            "  output_throughput_tok_s: {:.6}",
+            self.throughput.output_throughput_tok_s
+        )?;
+        writeln!(
+            f,
+            "  total_input_tokens: {}",
+            self.request_counts.total_input_tokens
+        )?;
+        writeln!(
+            f,
+            "  total_output_tokens: {}",
+            self.request_counts.total_output_tokens
+        )?;
+        writeln!(
+            f,
+            "  processed_tokens_per_s: {:.6}",
+            self.processed_tokens_per_s()
+        )?;
+        writeln!(
+            f,
+            "  processed_output_tokens_per_s: {:.6}",
+            self.processed_output_tokens_per_s()
+        )?;
+        writeln!(f, "  mean_ttft_ms: {:.6}", self.latency.ttft.mean_ms)?;
+        writeln!(f, "  mean_e2e_latency_ms: {:.6}", self.latency.e2e.mean_ms)?;
+        if let Some(power) = self.power {
+            match power.power_w {
+                Some(power_w) => writeln!(f, "  power_w: {power_w:.6}")?,
+                None => writeln!(f, "  power_w: unavailable")?,
+            }
+            writeln!(f, "  power_coverage: {:.6}", power.coverage)?;
+        } else {
+            writeln!(f, "  power_w: unavailable (energy provider unsupported)")?;
+            writeln!(
+                f,
+                "  power_coverage: unavailable (energy provider unsupported)"
+            )?;
+        }
+        writeln!(
+            f,
+            "  prefix_cache_reused_ratio: {:.6}",
+            self.prefix_cache_reused_ratio
+        )?;
+        writeln!(
+            f,
+            "  first_admission_prefix_cache_reused_ratio: {:.6}",
+            self.first_admission_prefix_cache_reused_ratio
+        )?;
+        write!(f, "  wall_time_ms: {:.6}", self.throughput.wall_time_ms)
+    }
+}
+
+impl Serialize for ReplayReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if let Some(power) = self.power {
+            power.validate().map_err(serde::ser::Error::custom)?;
+        }
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("kv_eviction_policy", &self.kv_eviction_policy)?;
+        if let Some(assumption) = self.kv_eviction_assumption {
+            map.serialize_entry("kv_eviction_assumption", assumption)?;
+        }
+        map.serialize_entry("committed_prefill_tokens", &self.committed_prefill_tokens)?;
+        if let Some(g3) = &self.g3_offload {
+            map.serialize_entry("g3_offload", g3)?;
+        }
+        if let Some(kvcr) = &self.kvcr {
+            map.serialize_entry("kvcr", kvcr)?;
+        }
+        if !self.g2_domains.is_empty() {
+            map.serialize_entry("g2_domains", &self.g2_domains)?;
+        }
+        map.serialize_entry("num_requests", &self.request_counts.num_requests)?;
+        map.serialize_entry(
+            "completed_requests",
+            &self.request_counts.completed_requests,
+        )?;
+        map.serialize_entry(
+            "total_input_tokens",
+            &self.request_counts.total_input_tokens,
+        )?;
+        map.serialize_entry(
+            "total_output_tokens",
+            &self.request_counts.total_output_tokens,
+        )?;
+        map.serialize_entry("duration_ms", &self.throughput.duration_ms)?;
+        map.serialize_entry("wall_time_ms", &self.throughput.wall_time_ms)?;
+        map.serialize_entry(
+            "request_throughput_rps",
+            &self.throughput.request_throughput_rps,
+        )?;
+        map.serialize_entry(
+            "input_throughput_tok_s",
+            &self.throughput.input_throughput_tok_s,
+        )?;
+        map.serialize_entry(
+            "output_throughput_tok_s",
+            &self.throughput.output_throughput_tok_s,
+        )?;
+        map.serialize_entry(
+            "total_throughput_tok_s",
+            &self.throughput.total_throughput_tok_s,
+        )?;
+        map.serialize_entry(
+            "prefill_worker_seconds",
+            &self.throughput.prefill_worker_seconds,
+        )?;
+        map.serialize_entry(
+            "decode_worker_seconds",
+            &self.throughput.decode_worker_seconds,
+        )?;
+        map.serialize_entry(
+            "prefill_gpus_per_worker",
+            &self.throughput.prefill_gpus_per_worker,
+        )?;
+        map.serialize_entry(
+            "decode_gpus_per_worker",
+            &self.throughput.decode_gpus_per_worker,
+        )?;
+        if self.throughput.encoder_gpus > 0 {
+            map.serialize_entry("encoder_gpus", &self.throughput.encoder_gpus)?;
+        }
+        map.serialize_entry("gpu_hours", &self.throughput.gpu_hours)?;
+        if let Some(goodput) = &self.goodput {
+            map.serialize_entry("goodput_completed_requests", &goodput.completed_requests)?;
+            map.serialize_entry(
+                "goodput_request_throughput_rps",
+                &goodput.request_throughput_rps,
+            )?;
+            map.serialize_entry(
+                "goodput_output_throughput_tok_s",
+                &goodput.output_throughput_tok_s,
+            )?;
+        }
+        map.serialize_entry("power_w", &self.power.and_then(|power| power.power_w))?;
+        map.serialize_entry("power_coverage", &self.power.map(|power| power.coverage))?;
+        if let Some(power_diagnostics) = &self.power_diagnostics {
+            map.serialize_entry("power_diagnostics", power_diagnostics)?;
+        }
+        map.serialize_entry("processed_tokens", &self.processed_tokens())?;
+        map.serialize_entry("processed_tokens_per_s", &self.processed_tokens_per_s())?;
+        map.serialize_entry(
+            "processed_output_tokens_per_s",
+            &self.processed_output_tokens_per_s(),
+        )?;
+        map.serialize_entry("prefix_cache_reused_ratio", &self.prefix_cache_reused_ratio)?;
+        map.serialize_entry(
+            "first_admission_prefix_cache_reused_ratio",
+            &self.first_admission_prefix_cache_reused_ratio,
+        )?;
+        map.serialize_entry("num_ttft_samples", &self.latency.num_ttft_samples)?;
+        map.serialize_entry("num_tpot_samples", &self.latency.num_tpot_samples)?;
+        map.serialize_entry(
+            "num_e2e_latency_samples",
+            &self.latency.num_e2e_latency_samples,
+        )?;
+        serialize_distribution(&mut map, "ttft", &self.latency.ttft)?;
+        serialize_distribution(&mut map, "ttst", &self.latency.ttst)?;
+        serialize_distribution(&mut map, "tpot", &self.latency.tpot)?;
+        serialize_distribution(&mut map, "itl", &self.latency.itl.distribution)?;
+        map.serialize_entry("max_itl_ms", &self.latency.itl.max_ms)?;
+        if let Some(trajectories) = &self.trajectories {
+            map.serialize_entry("total_trajectories", &trajectories.total)?;
+            map.serialize_entry("completed_trajectories", &trajectories.completed)?;
+            map.serialize_entry("incomplete_trajectories", &trajectories.incomplete)?;
+            serialize_distribution(&mut map, "trajectory_e2e_latency", &trajectories.e2e)?;
+            map.serialize_entry("p50_trajectory_e2e_latency_ms", &trajectories.e2e.median_ms)?;
+        }
+        if let Some(agentic_graph) = &self.agentic_graph {
+            map.serialize_entry("agentic_graph", agentic_graph)?;
+        }
+        if let Some(snapshots) = &self.agentic_snapshots {
+            map.serialize_entry("agentic_snapshots", snapshots)?;
+        }
+        if let Some(phases) = &self.agentic_phases {
+            map.serialize_entry("agentic_phases", phases)?;
+        }
+        if let Some(profile) = &self.agentic_profile {
+            map.serialize_entry("agentic_profile", profile)?;
+        }
+        if let Some(lifecycle) = &self.agentic_lifecycle {
+            map.serialize_entry("agentic_lifecycle_event_count", &lifecycle.events.len())?;
+            map.serialize_entry(
+                "agentic_lifecycle_digest",
+                &lifecycle.digest().map_err(serde::ser::Error::custom)?,
+            )?;
+        }
+        if let Some(outcomes) = &self.agentic_play_outcomes {
+            map.serialize_entry("agentic_play_outcomes", outcomes)?;
+        }
+        serialize_distribution(&mut map, "e2e_latency", &self.latency.e2e)?;
+        if let Some(stages) = &self.latency.ttft_milestones {
+            map.serialize_entry("mean_frontend_ms", &stages.mean_frontend_ms)?;
+            map.serialize_entry(
+                "mean_scheduler_inbox_wait_ms",
+                &stages.mean_scheduler_inbox_wait_ms,
+            )?;
+            map.serialize_entry("mean_receive_to_admit_ms", &stages.mean_receive_to_admit_ms)?;
+            map.serialize_entry("mean_prefill_elapsed_ms", &stages.mean_prefill_elapsed_ms)?;
+            map.serialize_entry(
+                "mean_result_observation_delay_ms",
+                &stages.mean_result_observation_delay_ms,
+            )?;
+            map.serialize_entry(
+                "mean_handoff_to_first_token_ms",
+                &stages.mean_handoff_to_first_token_ms,
+            )?;
+        }
+        if let Some(encoder_latency_ms) = self.latency.encoder_latency_ms {
+            map.serialize_entry("encoder_latency_ms", &encoder_latency_ms)?;
+        }
+        serialize_rate_distribution(
+            &mut map,
+            "output_token_throughput_per_user",
+            &self.latency.output_token_throughput_per_user,
+        )?;
+        map.end()
+    }
+}
+
+fn serialize_distribution<S>(
+    map: &mut S,
+    prefix: &str,
+    stats: &TraceDistributionStats,
+) -> Result<(), S::Error>
+where
+    S: SerializeMap,
+{
+    map.serialize_entry(&format!("mean_{prefix}_ms"), &stats.mean_ms)?;
+    map.serialize_entry(&format!("min_{prefix}_ms"), &stats.min_ms)?;
+    map.serialize_entry(&format!("max_{prefix}_ms"), &stats.max_ms)?;
+    map.serialize_entry(&format!("median_{prefix}_ms"), &stats.median_ms)?;
+    map.serialize_entry(&format!("p75_{prefix}_ms"), &stats.p75_ms)?;
+    map.serialize_entry(&format!("p90_{prefix}_ms"), &stats.p90_ms)?;
+    map.serialize_entry(&format!("p95_{prefix}_ms"), &stats.p95_ms)?;
+    map.serialize_entry(&format!("p99_{prefix}_ms"), &stats.p99_ms)?;
+    map.serialize_entry(&format!("std_{prefix}_ms"), &stats.std_ms)?;
+    Ok(())
+}
+
+fn serialize_rate_distribution<S>(
+    map: &mut S,
+    prefix: &str,
+    stats: &TraceDistributionStats,
+) -> Result<(), S::Error>
+where
+    S: SerializeMap,
+{
+    map.serialize_entry(&format!("mean_{prefix}"), &stats.mean_ms)?;
+    map.serialize_entry(&format!("min_{prefix}"), &stats.min_ms)?;
+    map.serialize_entry(&format!("max_{prefix}"), &stats.max_ms)?;
+    map.serialize_entry(&format!("median_{prefix}"), &stats.median_ms)?;
+    map.serialize_entry(&format!("p75_{prefix}"), &stats.p75_ms)?;
+    map.serialize_entry(&format!("p90_{prefix}"), &stats.p90_ms)?;
+    map.serialize_entry(&format!("p95_{prefix}"), &stats.p95_ms)?;
+    map.serialize_entry(&format!("p99_{prefix}"), &stats.p99_ms)?;
+    map.serialize_entry(&format!("std_{prefix}"), &stats.std_ms)?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct TraceRequestStats {
+    arrival_time_ms: f64,
+    first_admit_ms: Option<f64>,
+    terminal_time_ms: Option<f64>,
+    terminal_status: Option<ReplayTerminalStatus>,
+    token_timeline: TokenTimeline,
+    input_length: usize,
+    requested_output_length: usize,
+    reused_input_tokens: usize,
+    first_admission_reused_input_tokens: usize,
+    /// Index of the prefill worker that handled this request, if any.
+    /// `None` in two situations:
+    ///   - Aggregated replay (no separate prefill pool) — meaningless field.
+    ///   - Offline disagg with conditional-prefill bypass — request was
+    ///     routed directly to a decode worker without going through prefill.
+    ///
+    /// Downstream tooling derives "was_bypassed" as `prefill_worker_idx is None`
+    /// in disagg mode.
+    prefill_worker_idx: Option<usize>,
+    /// Index of the decode worker that handled this request, if any.
+    decode_worker_idx: Option<usize>,
+    /// Session / turn metadata copied from the workload driver, when the
+    /// trace source carries it (e.g., multi-turn Mooncake). `None` for raw
+    /// single-shot request lists.
+    session_id: Option<String>,
+    turn_index: Option<usize>,
+    authored_id: Option<String>,
+    play_id: Option<String>,
+    dispatched_at_ms: Option<f64>,
+    tokenized_ms: Option<f64>,
+    metadata: Value,
+    /// Scheduler-thread stages of a host-aware engine; all `None` otherwise.
+    ttft_milestones: TtftMilestoneTimes,
+    /// When the encoder pool delivered this request's embeddings, if it crossed one.
+    encoder_ready_ms: Option<f64>,
+    agentic: Option<AgenticRuntimeIdentity>,
+    detail: Option<Box<PerRequestDetail>>,
+}
+
+/// First time a request reached each scheduler-thread stage.
+#[derive(Debug, Default, Clone, Copy)]
+struct TtftMilestoneTimes {
+    frontend_ready_ms: Option<f64>,
+    scheduler_received_ms: Option<f64>,
+    selected_ms: Option<f64>,
+    prefill_complete_ms: Option<f64>,
+    /// A prefill rank observed the finished extend and holds the KV source.
+    source_held_ms: Option<f64>,
+}
+
+impl TtftMilestoneTimes {
+    /// Time spent in each stage on the way to the first token, in the order of
+    /// [`TraceTtftStageStats`]; `None` until every scheduler stage was reached.
+    fn stage_spans(&self, arrival_ms: f64, first_token_ms: f64) -> Option<[f64; 6]> {
+        let received = self.scheduler_received_ms?;
+        let selected = self.selected_ms?;
+        let prefill_complete = self.prefill_complete_ms?;
+        let frontend_exit = self.frontend_ready_ms.unwrap_or(arrival_ms);
+        // On a prefill rank the scheduler observes the result when it holds the
+        // KV source; the handoff and the decode rank's first step follow.
+        let observed = self.source_held_ms.unwrap_or(first_token_ms);
+        Some(
+            [
+                frontend_exit - arrival_ms,
+                received - frontend_exit,
+                selected - received,
+                prefill_complete - selected,
+                observed - prefill_complete,
+                first_token_ms - observed,
+            ]
+            .map(|span| span.max(0.0)),
+        )
+    }
+}
+
+#[derive(Debug)]
+enum TokenTimeline {
+    Recording(Vec<f64>),
+    Finalized(FinalizedTokenTimeline),
+}
+
+impl Default for TokenTimeline {
+    fn default() -> Self {
+        Self::Recording(Vec::new())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FinalizedTokenTimeline {
+    first_ms: f64,
+    second_ms: Option<f64>,
+    last_ms: f64,
+    len: usize,
+}
+
+#[derive(Debug)]
+struct StreamingDistribution {
+    sketch: DDSketch,
+    count: u64,
+    mean: f64,
+    sum_squared_deviations: f64,
+    min: f64,
+    max: f64,
+}
+
+impl Default for StreamingDistribution {
+    fn default() -> Self {
+        let sketch = match DDSketch::with_max_bins(DDSKETCH_RELATIVE_ACCURACY, DDSKETCH_MAX_BINS) {
+            Ok(sketch) => sketch,
+            Err(error) => panic!("invalid built-in DDSketch configuration: {error}"),
+        };
+        Self {
+            sketch,
+            count: 0,
+            mean: 0.0,
+            sum_squared_deviations: 0.0,
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+        }
+    }
+}
+
+impl StreamingDistribution {
+    fn add(&mut self, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
+
+        self.sketch.add(value);
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta_after_mean_update = value - self.mean;
+        self.sum_squared_deviations += delta * delta_after_mean_update;
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+    }
+
+    fn finish(&self) -> TraceDistributionStats {
+        if self.count == 0 {
+            return empty_distribution_stats();
+        }
+
+        TraceDistributionStats {
+            mean_ms: self.mean,
+            min_ms: self.min,
+            max_ms: self.max,
+            median_ms: self.percentile(50.0),
+            p75_ms: self.percentile(75.0),
+            p90_ms: self.percentile(90.0),
+            p95_ms: self.percentile(95.0),
+            p99_ms: self.percentile(99.0),
+            std_ms: (self.sum_squared_deviations / self.count as f64).sqrt(),
+        }
+    }
+
+    /// Preserve the report's historical rounded-rank percentile definition;
+    /// DDSketch itself uses a floored rank for its `quantile` input.
+    fn percentile(&self, percentile: f64) -> f64 {
+        let span = self.count.saturating_sub(1);
+        let rank = (span as f64 * percentile / 100.0).round() as u64;
+        let quantile = if span == 0 || rank >= span {
+            1.0
+        } else {
+            (rank as f64 + 0.5) / span as f64
+        };
+        match self.sketch.quantile(quantile) {
+            Ok(value) => value,
+            Err(error) => panic!("invalid built-in DDSketch quantile {quantile}: {error}"),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PerRequestDetail {
+    first_admission_cache_tier_attribution: Option<CacheTierAttribution>,
+    prefill_reused_input_tokens: Option<usize>,
+    prefill_admit_ms: Option<f64>,
+    source_held_ms: Option<f64>,
+    destination_reserved_ms: Option<f64>,
+    destination_activated_ms: Option<f64>,
+    decode_admit_ms: Option<f64>,
+    source_released_ms: Option<f64>,
+    decode_reused_input_tokens: Option<usize>,
+    prefill_route_overlap_tokens: Option<usize>,
+    decode_route_overlap_tokens: Option<usize>,
+    routing_history: Vec<PerRequestRoutingRecord>,
+    admission_history: Vec<PerRequestAdmissionRecord>,
+    pool_admission_counts: [usize; 3],
+    pressure_record_ordinals: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayRequestPool {
+    Agg,
+    Prefill,
+    Decode,
+}
+
+impl ReplayRequestPool {
+    const fn index(self) -> usize {
+        match self {
+            Self::Agg => 0,
+            Self::Prefill => 1,
+            Self::Decode => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayRoutingOutcome {
+    Immediate,
+    Queued,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PerRequestRoutingRecord {
+    pub pool: ReplayRequestPool,
+    pub outcome: ReplayRoutingOutcome,
+    pub queue_entered_at_ms: Option<f64>,
+    pub released_at_ms: Option<f64>,
+    pub queue_wait_ms: Option<f64>,
+    pub logical_worker_id: Option<usize>,
+    pub scheduler_id: Option<usize>,
+    pub dp_rank: Option<u32>,
+    pub reported_overlap_tokens: Option<usize>,
+    pub selected_overlap_blocks: Option<u32>,
+    pub best_available_overlap_blocks: Option<u32>,
+    pub overlap_regret_blocks: Option<u32>,
+    pub placement_replica_id: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PerRequestAdmissionRecord {
+    pub admission_ordinal: usize,
+    pub pool_admission_ordinal: usize,
+    pub pool: ReplayRequestPool,
+    pub at_ms: f64,
+    pub reused_input_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub g1_reused_input_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_reused_input_tokens: Option<usize>,
+    pub is_readmission: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayTerminalStatus {
+    Completed,
+    Rejected,
+    Canceled,
+    Failed,
+}
+
+/// Flat per-request record for optional JSONL emission. One JSON line per
+/// request is consumed by external analysis tools that want per-request
+/// granularity (TTFT vs. ISL scatter, worker-residency analysis, bypass
+/// classification, etc.).
+#[derive(Debug, Clone, Serialize)]
+pub struct PerRequestRecord {
+    /// Authored request identity from ReplaySpec. Legacy runtime inputs that
+    /// only carry an internal UUID leave this unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub play_id: Option<String>,
+    /// Session identifier from the trace, when present. Mirrors AIPerf's
+    /// `conversation_id` field for the same purpose: bucket per-request
+    /// records by multi-turn session. Placed first in the serialized output
+    /// so each JSONL row leads with its session/turn identity, matching
+    /// AIPerf's `profile_export.jsonl` layout.
+    pub session_id: Option<String>,
+    /// Zero-based turn index within `session_id`, when present.
+    pub turn_index: Option<usize>,
+    /// Authored provider-neutral metadata retained for correlation.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agentic: Option<AgenticRuntimeIdentity>,
+    /// Profile attribution for warmed runs. Preparation records live only in
+    /// `agentic_phases`; cold runs retain the existing absent field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agentic_phase: Option<AgenticReplayPhase>,
+    pub uuid: String,
+    pub arrival_time_ms: f64,
+    pub dispatched_at_ms: Option<f64>,
+    /// When tokenization finished and the request reached its worker's
+    /// engine. Present only when tokenization latency is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokenized_ms: Option<f64>,
+    pub first_admit_ms: Option<f64>,
+    pub terminal_time_ms: f64,
+    pub first_token_ms: Option<f64>,
+    pub last_token_ms: Option<f64>,
+    pub ttft_ms: Option<f64>,
+    pub ttst_ms: Option<f64>,
+    pub e2e_latency_ms: Option<f64>,
+    /// Inter-token latency for this request, in milliseconds. Matches
+    /// AIPerf's `inter_token_latency` field — one scalar per request.
+    pub itl_ms: Option<f64>,
+    pub input_length: usize,
+    /// Number of output tokens requested by the workload trace.
+    pub requested_output_length: usize,
+    /// Number of output tokens actually emitted by the mock engine.
+    pub output_length: usize,
+    pub reused_input_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_admission_g1_reused_input_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_admission_host_reused_input_tokens: Option<usize>,
+    pub prefill_worker_idx: Option<usize>,
+    pub decode_worker_idx: Option<usize>,
+    pub prefill_admit_ms: Option<f64>,
+    /// When the encoder pool delivered the embeddings; absent without an encoder pool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoder_ready_ms: Option<f64>,
+    /// Host-aware scheduler stages; absent unless the engine models its scheduler thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frontend_ready_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler_received_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_complete_ms: Option<f64>,
+    pub source_held_ms: Option<f64>,
+    pub destination_reserved_ms: Option<f64>,
+    pub destination_activated_ms: Option<f64>,
+    pub decode_admit_ms: Option<f64>,
+    pub source_released_ms: Option<f64>,
+    pub decode_reused_input_tokens: Option<usize>,
+    pub prefill_route_overlap_tokens: Option<usize>,
+    pub decode_route_overlap_tokens: Option<usize>,
+    pub routing_history: Vec<PerRequestRoutingRecord>,
+    pub admission_history: Vec<PerRequestAdmissionRecord>,
+    pub admission_count: usize,
+    pub readmission_count: usize,
+    pub pressure_record_ordinals: Vec<u64>,
+    pub terminal_status: ReplayTerminalStatus,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TraceRequestStatsSnapshot {
+    pub arrival_time_ms: f64,
+    pub first_admit_ms: Option<f64>,
+    pub first_token_ms: Option<f64>,
+    pub last_token_ms: Option<f64>,
+    pub input_length: usize,
+    pub requested_output_length: usize,
+    pub output_length: usize,
+    pub reused_input_tokens: usize,
+    pub first_admission_reused_input_tokens: usize,
+}
+
+/// SLA thresholds used to classify requests for goodput. Every configured
+/// field is enforced independently; an unset field is unbounded. All-`None`
+/// (the default) means "no SLA", which suppresses goodput entirely.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, serde::Deserialize)]
+pub struct SlaThresholds {
+    pub ttft_ms: Option<f64>,
+    pub itl_ms: Option<f64>,
+    pub e2e_ms: Option<f64>,
+}
+
+impl SlaThresholds {
+    pub fn is_set(&self) -> bool {
+        self.ttft_ms.is_some() || self.itl_ms.is_some() || self.e2e_ms.is_some()
+    }
+
+    pub(crate) fn is_unset(&self) -> bool {
+        !self.is_set()
+    }
+
+    pub(crate) fn validate(&self) -> crate::replay::ReplayResult<()> {
+        let token_form = self.ttft_ms.is_some() || self.itl_ms.is_some();
+        if token_form && self.e2e_ms.is_some() {
+            return Err(crate::replay::ReplayError::InvalidSpec(
+                "sla.e2e_ms is mutually exclusive with sla.ttft_ms/itl_ms".to_string(),
+            ));
+        }
+        for (name, value) in [
+            ("sla.ttft_ms", self.ttft_ms),
+            ("sla.itl_ms", self.itl_ms),
+            ("sla.e2e_ms", self.e2e_ms),
+        ] {
+            if let Some(value) = value
+                && (!value.is_finite() || value <= 0.0)
+            {
+                return Err(crate::replay::ReplayError::InvalidSpec(format!(
+                    "{name} must be finite and positive, got {value}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a completed request satisfies the SLA. Each *set* threshold must
+    /// hold; unset thresholds are ignored.
+    ///
+    /// - `ttft_ms`: time-to-first-token ≤ bound.
+    /// - `e2e_ms`: end-to-end latency ≤ bound.
+    /// - `itl_ms`: the per-request **average inter-token latency** ≤ bound,
+    ///   computed the same way as aiperf / genai-perf:
+    ///   `avg_itl = (e2e_ms − ttft_ms) / (output_length − 1)`. When
+    ///   `output_length ≤ 1` there is no inter-token interval, so the ITL check
+    ///   is skipped (treated as satisfied).
+    fn is_good(&self, ttft_ms: f64, e2e_ms: f64, output_length: usize) -> bool {
+        if let Some(bound) = self.e2e_ms
+            && e2e_ms > bound
+        {
+            return false;
+        }
+        if let Some(bound) = self.ttft_ms
+            && ttft_ms > bound
+        {
+            return false;
+        }
+        if let Some(bound) = self.itl_ms
+            && output_length > 1
+        {
+            let avg_itl_ms = (e2e_ms - ttft_ms) / (output_length as f64 - 1.0);
+            if avg_itl_ms > bound {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn is_good_without_tokens(&self, e2e_ms: f64) -> bool {
+        self.ttft_ms.is_none()
+            && self.itl_ms.is_none()
+            && self.e2e_ms.is_some_and(|bound| e2e_ms <= bound)
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct TraceCollector {
+    completion_feedback: Option<feedback::CompletionFeedback>,
+    pub(crate) g3_offload: Option<crate::engine::G3Stats>,
+    pub(crate) kvcr: Option<crate::engine::KvcrStats>,
+    pub(crate) g2_domains: Vec<G2DomainStats>,
+    committed_prefill_tokens: u64,
+    requests: FxHashMap<Uuid, TraceRequestStats>,
+    batch_reporting: bool,
+    bounded_summary: Option<bounded::BoundedSummary>,
+    completed_to_retire: Vec<Uuid>,
+    prepared_report: Option<ReplayReport>,
+    /// Absolute simulated timestamp at which this reporting epoch began.
+    /// Collection uses the runtime clock; aggregate rates use elapsed epoch
+    /// time. Warmed reports rebase measured request and play outcome timestamps
+    /// to the profile barrier when building the report.
+    report_start_ms: f64,
+    /// Global per-token distributions are folded in as requests terminate, so
+    /// completed requests no longer retain one timestamp per emitted token.
+    itl_distribution: StreamingDistribution,
+    output_token_throughput_per_user: StreamingDistribution,
+    /// Keep completed token timelines until `finish()` instead of folding them
+    /// synchronously in `on_terminal`.
+    defer_token_timeline_finalization: bool,
+    /// When `true`, `finish()` populates `ReplayReport::per_request`.
+    /// Default `false` to skip the ~100ms terminal pass + ~30MB allocation
+    /// when the caller doesn't need per-request granularity.
+    capture_per_request: bool,
+    /// SLA thresholds for goodput classification. All-`None` by default, in
+    /// which case `finish()` leaves `ReplayReport::goodput` as `None`.
+    sla: SlaThresholds,
+    /// Accumulated provisioned worker-seconds per role, integrated by the
+    /// runtime over the sim clock (see `add_worker_seconds`). Used for the
+    /// runtimes that have an event loop (agg / disagg), where the provisioned
+    /// count varies with startup / drain / scaling.
+    prefill_worker_seconds: f64,
+    decode_worker_seconds: f64,
+    /// Encoder-pool GPU-seconds integrated on the same clock as the
+    /// worker-seconds (see `add_encoder_gpu_seconds`); 0.0 without a pool.
+    encoder_gpu_seconds: f64,
+    /// Static provisioned worker counts `(prefill, decode)` for externally
+    /// clocked runtimes with a fixed deployment size. When `Some`, `finish()`
+    /// derives worker-seconds as `count × duration_s` instead of using the
+    /// accumulator.
+    static_worker_count: Option<(usize, usize)>,
+    /// GPUs per worker per role, from the mocker engine parallelism. Used in
+    /// `finish()` to turn worker-seconds into gpu_hours.
+    prefill_gpus_per_worker: usize,
+    decode_gpus_per_worker: usize,
+    /// GPUs of the static encoder pool; `add_encoder_gpu_seconds` charges them
+    /// on every clock advance.
+    encoder_gpus: usize,
+    runtime_evidence: crate::replay::OfflineRuntimeEvidence,
+    agentic_trajectory: Option<AgenticTrajectorySnapshot>,
+    agentic_graph: Option<AgenticGraphIdentity>,
+    agentic_snapshots: Option<Vec<AgenticSnapshotEvidence>>,
+    agentic_phases: Option<AgenticPhaseEvidence>,
+    agentic_profile: Option<crate::replay::loadgen::AgenticProfileReport>,
+    g3_profile_baseline: Option<crate::engine::G3Stats>,
+    agentic_lifecycle: Option<AgenticLifecycleTranscript>,
+    agentic_play_outcomes: Option<Vec<AgenticPlayOutcome>>,
+}
+
+impl TraceRequestStats {
+    fn first_token_ms(&self) -> Option<f64> {
+        match &self.token_timeline {
+            TokenTimeline::Recording(times) => times.first().copied(),
+            TokenTimeline::Finalized(summary) => Some(summary.first_ms),
+        }
+    }
+
+    fn last_token_ms(&self) -> Option<f64> {
+        match &self.token_timeline {
+            TokenTimeline::Recording(times) => times.last().copied(),
+            TokenTimeline::Finalized(summary) => Some(summary.last_ms),
+        }
+    }
+
+    fn actual_output_length(&self) -> usize {
+        match &self.token_timeline {
+            TokenTimeline::Recording(times) => times.len(),
+            TokenTimeline::Finalized(summary) => summary.len,
+        }
+    }
+
+    fn mean_tpot_ms(&self) -> Option<f64> {
+        let num_gaps = self.actual_output_length().saturating_sub(1);
+        if num_gaps == 0 {
+            return None;
+        }
+
+        let first_token_ms = self.first_token_ms()?;
+        let last_token_ms = self.last_token_ms()?;
+        Some((last_token_ms - first_token_ms).max(0.0) / num_gaps as f64)
+    }
+
+    fn ttst_ms(&self) -> Option<f64> {
+        let (first_token_ms, second_token_ms) = match &self.token_timeline {
+            TokenTimeline::Recording(times) => {
+                let [first_token_ms, second_token_ms, ..] = times.as_slice() else {
+                    return None;
+                };
+                (*first_token_ms, *second_token_ms)
+            }
+            TokenTimeline::Finalized(summary) => (summary.first_ms, summary.second_ms?),
+        };
+        Some((second_token_ms - first_token_ms).max(0.0))
+    }
+
+    fn finalize_token_timeline(
+        &mut self,
+        include_in_distributions: bool,
+        itl_distribution: &mut StreamingDistribution,
+        output_token_throughput_per_user: &mut StreamingDistribution,
+    ) {
+        let TokenTimeline::Recording(times) = &self.token_timeline else {
+            return;
+        };
+
+        if include_in_distributions {
+            for window in times.windows(2) {
+                let itl_ms = (window[1] - window[0]).max(0.0);
+                itl_distribution.add(itl_ms);
+                if itl_ms > 0.0 {
+                    output_token_throughput_per_user.add(1000.0 / itl_ms);
+                }
+            }
+        }
+
+        let Some(first_ms) = times.first().copied() else {
+            self.token_timeline = TokenTimeline::default();
+            return;
+        };
+        let summary = FinalizedTokenTimeline {
+            first_ms,
+            second_ms: times.get(1).copied(),
+            last_ms: times.last().copied().unwrap_or(first_ms),
+            len: times.len(),
+        };
+        self.token_timeline = TokenTimeline::Finalized(summary);
+    }
+}
+
+impl TraceCollector {
+    /// Batch runs may retire terminal state after runtime completion callbacks.
+    /// Steppable SDK runtimes retain their existing request-query semantics.
+    pub(crate) fn begin_batch_reporting(&mut self) {
+        self.batch_reporting = true;
+        if !self.capture_per_request && !self.defer_token_timeline_finalization {
+            self.bounded_summary = Some(bounded::BoundedSummary::default());
+        }
+    }
+
+    /// Retain primer/warmup admissions until the barrier copies them into the
+    /// preparation ledger. The next reporting epoch resumes bounded storage.
+    pub(crate) fn begin_batch_preparation_reporting(&mut self) {
+        self.batch_reporting = true;
+    }
+
+    pub(crate) fn is_batch_reporting(&self) -> bool {
+        self.batch_reporting
+    }
+
+    fn retire_completed(&mut self) -> anyhow::Result<()> {
+        if let Some(summary) = &mut self.bounded_summary {
+            for uuid in self.completed_to_retire.drain(..) {
+                if let Some(stats) = self.requests.remove(&uuid) {
+                    summary.add(&stats, self.sla)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn try_on_arrival(
+        &mut self,
+        uuid: Uuid,
+        at_ms: f64,
+        input: usize,
+        output: usize,
+    ) -> anyhow::Result<()> {
+        self.retire_completed().map_err(|error| {
+            crate::replay::ReplayError::ResourceLimited(format!("report storage: {error:#}"))
+        })?;
+        self.on_arrival(uuid, at_ms, input, output);
+        Ok(())
+    }
+
+    pub(crate) fn prepare_batch_report(&mut self) -> anyhow::Result<()> {
+        self.retire_completed().map_err(|error| {
+            crate::replay::ReplayError::ResourceLimited(format!("report storage: {error:#}"))
+        })?;
+        let Some(mut summary) = self.bounded_summary.take() else {
+            return Ok(());
+        };
+        for (_, mut stats) in self.requests.drain() {
+            stats.finalize_token_timeline(
+                stats.terminal_status == Some(ReplayTerminalStatus::Completed)
+                    && stats.first_admit_ms.is_some(),
+                &mut self.itl_distribution,
+                &mut self.output_token_throughput_per_user,
+            );
+            summary.add(&stats, self.sla).map_err(|error| {
+                crate::replay::ReplayError::ResourceLimited(format!("report storage: {error:#}"))
+            })?;
+        }
+        let base = std::mem::take(self).finish_at(Some(summary.duration_ms()));
+        self.prepared_report = Some(summary.finish(base).map_err(|error| {
+            crate::replay::ReplayError::ResourceLimited(format!("report storage: {error:#}"))
+        })?);
+        Ok(())
+    }
+
+    /// Call once per native pass completion, independently of sampled FPM
+    /// telemetry. Repeated admissions and preemption make reuse-derived work
+    /// estimates incorrect; only the committed pass describes executed work.
+    pub(crate) fn on_completed_prefill_work(&mut self, tokens: u64) {
+        self.committed_prefill_tokens += tokens;
+    }
+
+    pub(crate) fn contains_request(&self, uuid: Uuid) -> bool {
+        self.requests.contains_key(&uuid)
+    }
+
+    /// Defer token-timeline folding until the entire replay has ended.
+    pub fn set_defer_token_timeline_finalization(&mut self, value: bool) {
+        self.defer_token_timeline_finalization = value;
+    }
+
+    /// Toggle whether `finish()` should build per-request records. Off by
+    /// default; the runtimes flip it on when the caller asks for JSONL output.
+    pub fn set_capture_per_request(&mut self, value: bool) {
+        self.capture_per_request = value;
+    }
+
+    /// Set the SLA thresholds used to classify goodput in `finish()`. With no
+    /// SLA set (the default), the report's `goodput` field stays `None`.
+    pub fn set_sla_thresholds(&mut self, sla: SlaThresholds) {
+        self.sla = sla;
+    }
+
+    pub(crate) fn enable_completion_feedback(&mut self) {
+        self.completion_feedback.get_or_insert_with(Default::default);
+    }
+
+    pub(crate) fn completion_feedback_snapshot(&mut self) -> Option<CompletionFeedbackSnapshot> {
+        let gpu_seconds = self.prefill_worker_seconds * self.prefill_gpus_per_worker as f64
+            + self.decode_worker_seconds * self.decode_gpus_per_worker as f64
+            + self.encoder_gpu_seconds;
+        self.completion_feedback
+            .as_mut()
+            .map(|feedback| feedback.snapshot(self.sla, gpu_seconds))
+    }
+
+    /// Add provisioned worker-seconds for the interval just elapsed. The runtime
+    /// calls this each time it advances the sim clock, with
+    /// `provisioned_count × dt_ms / 1000` per role — the time-integral of the
+    /// *provisioned* worker count (active + starting-up + draining), so the
+    /// startup ramp and drain tail are included. Agg replay passes `prefill = 0`
+    /// and reports through `decode`.
+    pub(crate) fn add_worker_seconds(&mut self, prefill: f64, decode: f64) {
+        self.prefill_worker_seconds += prefill;
+        self.decode_worker_seconds += decode;
+    }
+
+    /// Add the encoder pool's GPU-seconds for the interval just elapsed:
+    /// `encoder_gpus × dt_s`. The runtime calls this on the same clock
+    /// advances as `add_worker_seconds`, so both terms of `gpu_hours` share one
+    /// clock. Without an encoder pool `encoder_gpus` is 0 and nothing accrues.
+    pub(crate) fn add_encoder_gpu_seconds(&mut self, dt_s: f64) {
+        self.encoder_gpu_seconds += self.encoder_gpus as f64 * dt_s;
+    }
+
+    /// Declare a fixed `(prefill, decode)` provisioned worker count for an
+    /// externally clocked runtime that does not integrate worker counts on
+    /// each clock advance. `finish()` then reports `count × duration_s`
+    /// worker-seconds.
+    pub fn set_static_worker_count(&mut self, prefill: usize, decode: usize) {
+        self.static_worker_count = Some((prefill, decode));
+    }
+
+    pub(crate) fn clear_static_worker_count(&mut self) {
+        self.static_worker_count = None;
+    }
+
+    /// GPUs of the encoder pool ahead of the language workers.
+    pub(crate) fn set_encoder_gpus(&mut self, gpus: usize) {
+        self.encoder_gpus = gpus;
+    }
+
+    /// Set GPUs-per-worker per role (from the mocker engine parallelism). Used
+    /// in `finish()` to derive gpu_hours from the worker-seconds.
+    pub fn set_gpus_per_worker(&mut self, prefill: usize, decode: usize) {
+        self.prefill_gpus_per_worker = prefill;
+        self.decode_gpus_per_worker = decode;
+    }
+
+    pub(crate) fn set_runtime_evidence(&mut self, evidence: crate::replay::OfflineRuntimeEvidence) {
+        self.runtime_evidence = evidence;
+    }
+
+    pub fn on_arrival(
+        &mut self,
+        uuid: Uuid,
+        arrival_time_ms: f64,
+        input_length: usize,
+        requested_output_length: usize,
+    ) {
+        self.requests.insert(
+            uuid,
+            TraceRequestStats {
+                arrival_time_ms,
+                first_admit_ms: None,
+                terminal_time_ms: None,
+                terminal_status: None,
+                token_timeline: TokenTimeline::default(),
+                input_length,
+                requested_output_length,
+                reused_input_tokens: 0,
+                prefill_worker_idx: None,
+                decode_worker_idx: None,
+                session_id: None,
+                turn_index: None,
+                authored_id: None,
+                play_id: None,
+                dispatched_at_ms: None,
+                tokenized_ms: None,
+                metadata: Value::Null,
+                agentic: None,
+                first_admission_reused_input_tokens: 0,
+                ttft_milestones: TtftMilestoneTimes::default(),
+                encoder_ready_ms: None,
+                detail: self
+                    .capture_per_request
+                    .then(|| Box::new(PerRequestDetail::default())),
+            },
+        );
+    }
+
+    /// Attach session/turn metadata to a request. Called by the disagg/agg
+    /// runtimes when the workload driver provides it (multi-turn traces).
+    /// Idempotent — set-once semantics, so calling on the same uuid more than
+    /// once is a no-op after the first.
+    pub fn on_session_metadata(&mut self, uuid: Uuid, session_id: String, turn_index: usize) {
+        if !self.capture_per_request {
+            return;
+        }
+        if let Some(stats) = self.requests.get_mut(&uuid)
+            && stats.session_id.is_none()
+        {
+            stats.session_id = Some(session_id);
+            stats.turn_index = Some(turn_index);
+        }
+    }
+
+    pub fn on_agentic_metadata(
+        &mut self,
+        uuid: Uuid,
+        request_id: String,
+        play_id: String,
+        dispatched_at_ms: f64,
+    ) {
+        if !self.capture_per_request {
+            return;
+        }
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.authored_id = Some(request_id);
+            stats.play_id = Some(play_id);
+            stats.dispatched_at_ms = Some(dispatched_at_ms);
+        }
+    }
+
+    pub fn on_tokenized(&mut self, uuid: Uuid, tokenized_ms: f64) {
+        if !self.capture_per_request {
+            return;
+        }
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.tokenized_ms = Some(tokenized_ms);
+        }
+    }
+
+    pub fn set_agentic_trajectory(&mut self, snapshot: AgenticTrajectorySnapshot) {
+        self.agentic_trajectory = Some(snapshot);
+    }
+
+    pub fn set_agentic_graph(&mut self, identity: AgenticGraphIdentity) {
+        self.agentic_graph = Some(identity);
+    }
+
+    pub fn set_agentic_snapshots(&mut self, snapshots: Vec<AgenticSnapshotEvidence>) {
+        self.agentic_snapshots = Some(snapshots);
+    }
+
+    /// Preparation and lifecycle evidence use the absolute runtime clock.
+    /// Measured request and play outcome timestamps use the profile barrier
+    /// as their origin when preparation succeeded.
+    pub fn set_agentic_phases(&mut self, phases: AgenticPhaseEvidence) {
+        self.agentic_phases = Some(phases);
+    }
+
+    pub fn set_agentic_profile(&mut self, profile: crate::replay::loadgen::AgenticProfileReport) {
+        self.agentic_profile = Some(profile);
+    }
+
+    pub(crate) fn set_g3_profile_baseline(&mut self, baseline: Option<crate::engine::G3Stats>) {
+        self.g3_profile_baseline = baseline;
+    }
+
+    pub fn set_agentic_lifecycle(&mut self, transcript: AgenticLifecycleTranscript) {
+        self.agentic_lifecycle = Some(transcript);
+    }
+
+    pub fn set_agentic_play_outcomes(&mut self, outcomes: Vec<AgenticPlayOutcome>) {
+        self.agentic_play_outcomes = Some(outcomes);
+    }
+
+    /// Retain the ReplaySpec correlation fields before the request crosses
+    /// placement and engine boundaries.
+    pub fn on_request_context(
+        &mut self,
+        uuid: Uuid,
+        context: &crate::replay::ReplayRequestContext,
+    ) {
+        if !self.capture_per_request {
+            return;
+        }
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            if !context.authored_id.is_empty() {
+                stats.authored_id = Some(context.authored_id.clone());
+            }
+            stats.session_id = context
+                .session_id()
+                .map(str::to_owned)
+                .or(stats.session_id.take());
+            stats.turn_index = context.turn_index.or(stats.turn_index);
+            stats.metadata = context.metadata.clone();
+            stats.agentic = context.agentic.clone();
+        }
+    }
+
+    /// Record that `uuid` was dispatched to `worker_idx` on the prefill pool
+    /// (offline disagg replay only). Idempotent — subsequent calls are no-ops
+    /// once a value is set, so the first dispatch wins. Aggregated replay does
+    /// not call this; for those requests `prefill_worker_idx` stays `None`.
+    pub(crate) fn on_prefill_assigned(&mut self, uuid: Uuid, worker_idx: usize) {
+        if let Some(stats) = self.requests.get_mut(&uuid)
+            && stats.prefill_worker_idx.is_none()
+        {
+            stats.prefill_worker_idx = Some(worker_idx);
+        }
+    }
+
+    /// Record that `uuid` was dispatched to `worker_idx` on the decode pool
+    /// (offline disagg replay), or to the only pool (aggregated replay).
+    /// Idempotent.
+    pub fn on_decode_assigned(&mut self, uuid: Uuid, worker_idx: usize) {
+        if let Some(stats) = self.requests.get_mut(&uuid)
+            && stats.decode_worker_idx.is_none()
+        {
+            stats.decode_worker_idx = Some(worker_idx);
+        }
+    }
+
+    pub fn on_admit(&mut self, uuid: Uuid, admit_time_ms: f64, reused_input_tokens: usize) {
+        self.on_admit_with_tier_attribution(uuid, admit_time_ms, reused_input_tokens, None);
+    }
+
+    pub(crate) fn on_admit_with_tier_attribution(
+        &mut self,
+        uuid: Uuid,
+        admit_time_ms: f64,
+        reused_input_tokens: usize,
+        attribution: Option<CacheTierAttribution>,
+    ) {
+        if let Some(attribution) = attribution {
+            assert_eq!(
+                attribution
+                    .g1_reused_input_tokens
+                    .checked_add(attribution.host_reused_input_tokens),
+                Some(reused_input_tokens),
+                "G1 and host attribution must sum to total reuse"
+            );
+        }
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            if stats.first_admit_ms.is_none() {
+                stats.first_admission_reused_input_tokens = reused_input_tokens;
+                if let Some(detail) = stats.detail.as_deref_mut() {
+                    detail.first_admission_cache_tier_attribution = attribution;
+                }
+                stats.first_admit_ms = Some(admit_time_ms);
+            }
+            stats.reused_input_tokens = stats.reused_input_tokens.max(reused_input_tokens);
+        }
+    }
+
+    pub(crate) fn on_prefill_admit(
+        &mut self,
+        uuid: Uuid,
+        admit_time_ms: f64,
+        reused_input_tokens: usize,
+        attribution: Option<CacheTierAttribution>,
+    ) {
+        self.on_admit_with_tier_attribution(uuid, admit_time_ms, reused_input_tokens, attribution);
+        self.on_pool_admission_with_tier_attribution(
+            uuid,
+            ReplayRequestPool::Prefill,
+            admit_time_ms,
+            reused_input_tokens,
+            attribution,
+        );
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.prefill_admit_ms.get_or_insert(admit_time_ms);
+            detail.prefill_reused_input_tokens = Some(
+                detail
+                    .prefill_reused_input_tokens
+                    .unwrap_or_default()
+                    .max(reused_input_tokens),
+            );
+        }
+    }
+
+    pub(crate) fn on_decode_admit(
+        &mut self,
+        uuid: Uuid,
+        admit_time_ms: f64,
+        reused_input_tokens: usize,
+        attribution: Option<CacheTierAttribution>,
+    ) {
+        self.on_admit_with_tier_attribution(uuid, admit_time_ms, reused_input_tokens, attribution);
+        self.on_pool_admission_with_tier_attribution(
+            uuid,
+            ReplayRequestPool::Decode,
+            admit_time_ms,
+            reused_input_tokens,
+            attribution,
+        );
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.decode_admit_ms.get_or_insert(admit_time_ms);
+            detail.decode_reused_input_tokens = Some(
+                detail
+                    .decode_reused_input_tokens
+                    .unwrap_or_default()
+                    .max(reused_input_tokens),
+            );
+        }
+    }
+
+    pub(crate) fn on_source_held(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.ttft_milestones.source_held_ms.get_or_insert(at_ms);
+            if let Some(detail) = stats.detail.as_deref_mut() {
+                detail.source_held_ms.get_or_insert(at_ms);
+            }
+        }
+    }
+
+    /// Record the first time `uuid` reached a scheduler-thread stage.
+    pub(crate) fn on_ttft_milestone(&mut self, uuid: Uuid, stage: TtftMilestone, at_ms: f64) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            let stages = &mut stats.ttft_milestones;
+            let slot = match stage {
+                TtftMilestone::FrontendReady => &mut stages.frontend_ready_ms,
+                TtftMilestone::Received => &mut stages.scheduler_received_ms,
+                TtftMilestone::Selected => &mut stages.selected_ms,
+                TtftMilestone::PrefillComplete => &mut stages.prefill_complete_ms,
+            };
+            slot.get_or_insert(at_ms);
+        }
+    }
+
+    /// The encoder pool delivered the request's embeddings to the language rank.
+    pub(crate) fn on_encoder_ready(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.encoder_ready_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_destination_reserved(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.destination_reserved_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_destination_activated(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.destination_activated_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_source_released(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.source_released_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_prefill_route_overlap(&mut self, uuid: Uuid, tokens: usize) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.prefill_route_overlap_tokens.get_or_insert(tokens);
+        }
+    }
+
+    pub(crate) fn on_decode_route_overlap(&mut self, uuid: Uuid, tokens: usize) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.decode_route_overlap_tokens.get_or_insert(tokens);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on_route_immediate(
+        &mut self,
+        uuid: Uuid,
+        pool: ReplayRequestPool,
+        logical_worker_id: usize,
+        scheduler_id: usize,
+        dp_rank: u32,
+        reported_overlap_tokens: usize,
+        cache_sample: Option<PlacementCacheSample>,
+        placement_replica_id: Option<usize>,
+    ) {
+        let Some(detail) = self.detail_mut(uuid) else {
+            return;
+        };
+        detail.routing_history.push(PerRequestRoutingRecord {
+            pool,
+            outcome: ReplayRoutingOutcome::Immediate,
+            queue_entered_at_ms: None,
+            released_at_ms: None,
+            queue_wait_ms: Some(0.0),
+            logical_worker_id: Some(logical_worker_id),
+            scheduler_id: Some(scheduler_id),
+            dp_rank: Some(dp_rank),
+            reported_overlap_tokens: Some(reported_overlap_tokens),
+            selected_overlap_blocks: cache_sample.map(|sample| sample.overlap_blocks),
+            best_available_overlap_blocks: cache_sample
+                .map(|sample| sample.best_available_overlap_blocks),
+            overlap_regret_blocks: cache_sample.map(|sample| {
+                sample
+                    .best_available_overlap_blocks
+                    .saturating_sub(sample.overlap_blocks)
+            }),
+            placement_replica_id,
+        });
+    }
+
+    pub(crate) fn on_route_queued(&mut self, uuid: Uuid, pool: ReplayRequestPool, at_ms: f64) {
+        let Some(detail) = self.detail_mut(uuid) else {
+            return;
+        };
+        detail.routing_history.push(PerRequestRoutingRecord {
+            pool,
+            outcome: ReplayRoutingOutcome::Queued,
+            queue_entered_at_ms: Some(at_ms),
+            released_at_ms: None,
+            queue_wait_ms: None,
+            logical_worker_id: None,
+            scheduler_id: None,
+            dp_rank: None,
+            reported_overlap_tokens: None,
+            selected_overlap_blocks: None,
+            best_available_overlap_blocks: None,
+            overlap_regret_blocks: None,
+            placement_replica_id: None,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on_route_released(
+        &mut self,
+        uuid: Uuid,
+        pool: ReplayRequestPool,
+        at_ms: f64,
+        logical_worker_id: usize,
+        scheduler_id: usize,
+        dp_rank: u32,
+        reported_overlap_tokens: usize,
+        cache_sample: Option<PlacementCacheSample>,
+        placement_replica_id: Option<usize>,
+    ) {
+        let Some(detail) = self.detail_mut(uuid) else {
+            return;
+        };
+        let Some(route) = detail.routing_history.iter_mut().rev().find(|route| {
+            route.pool == pool
+                && route.outcome == ReplayRoutingOutcome::Queued
+                && route.released_at_ms.is_none()
+        }) else {
+            return;
+        };
+        let entered_at_ms = route.queue_entered_at_ms.unwrap_or(at_ms);
+        route.released_at_ms = Some(at_ms);
+        route.queue_wait_ms = Some((at_ms - entered_at_ms).max(0.0));
+        route.logical_worker_id = Some(logical_worker_id);
+        route.scheduler_id = Some(scheduler_id);
+        route.dp_rank = Some(dp_rank);
+        route.reported_overlap_tokens = Some(reported_overlap_tokens);
+        route.selected_overlap_blocks = cache_sample.map(|sample| sample.overlap_blocks);
+        route.best_available_overlap_blocks =
+            cache_sample.map(|sample| sample.best_available_overlap_blocks);
+        route.overlap_regret_blocks = cache_sample.map(|sample| {
+            sample
+                .best_available_overlap_blocks
+                .saturating_sub(sample.overlap_blocks)
+        });
+        route.placement_replica_id = placement_replica_id;
+    }
+
+    pub(crate) fn on_pool_admission_with_tier_attribution(
+        &mut self,
+        uuid: Uuid,
+        pool: ReplayRequestPool,
+        at_ms: f64,
+        reused_input_tokens: usize,
+        attribution: Option<CacheTierAttribution>,
+    ) {
+        let Some(detail) = self.detail_mut(uuid) else {
+            return;
+        };
+        let admission_ordinal = detail.admission_history.len();
+        let pool_count = &mut detail.pool_admission_counts[pool.index()];
+        let pool_admission_ordinal = *pool_count;
+        *pool_count += 1;
+        detail.admission_history.push(PerRequestAdmissionRecord {
+            admission_ordinal,
+            pool_admission_ordinal,
+            pool,
+            at_ms,
+            reused_input_tokens,
+            g1_reused_input_tokens: attribution.map(|value| value.g1_reused_input_tokens),
+            host_reused_input_tokens: attribution.map(|value| value.host_reused_input_tokens),
+            is_readmission: pool_admission_ordinal > 0,
+        });
+    }
+
+    pub(crate) fn on_pressure_reference(&mut self, uuid: Uuid, pressure_ordinal: u64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.pressure_record_ordinals.push(pressure_ordinal);
+        }
+    }
+
+    pub fn on_terminal(&mut self, uuid: Uuid, terminal_time_ms: f64, status: ReplayTerminalStatus) {
+        let Self {
+            completion_feedback,
+            sla,
+            requests,
+            itl_distribution,
+            output_token_throughput_per_user,
+            defer_token_timeline_finalization,
+            bounded_summary,
+            completed_to_retire,
+            ..
+        } = self;
+        if let Some(stats) = requests.get_mut(&uuid)
+            && stats.terminal_status.is_none()
+        {
+            stats.terminal_time_ms = Some(terminal_time_ms);
+            stats.terminal_status = Some(status);
+            if let Some(feedback) = completion_feedback {
+                feedback.observe(stats, *sla);
+            }
+            if bounded_summary.is_some() {
+                completed_to_retire.push(uuid);
+            }
+            if !*defer_token_timeline_finalization {
+                stats.finalize_token_timeline(
+                    status == ReplayTerminalStatus::Completed && stats.first_admit_ms.is_some(),
+                    itl_distribution,
+                    output_token_throughput_per_user,
+                );
+            }
+        }
+    }
+
+    fn detail_mut(&mut self, uuid: Uuid) -> Option<&mut PerRequestDetail> {
+        if !self.capture_per_request {
+            return None;
+        }
+        self.requests.get_mut(&uuid)?.detail.as_deref_mut()
+    }
+
+    pub fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
+        if let Some(stats) = self.requests.get_mut(&uuid)
+            && let TokenTimeline::Recording(times) = &mut stats.token_timeline
+        {
+            times.push(token_time_ms);
+        }
+    }
+
+    /// Return (ttft_ms, mean_itl_ms) for a completed request, if available.
+    pub(crate) fn request_latencies(&self, uuid: Uuid) -> Option<(f64, f64)> {
+        let stats = self.requests.get(&uuid)?;
+        let first_token_ms = stats.first_token_ms()?;
+        let ttft_ms = (first_token_ms - stats.arrival_time_ms).max(0.0);
+        let mean_itl_ms = stats.mean_tpot_ms().unwrap_or(0.0);
+        Some((ttft_ms, mean_itl_ms))
+    }
+
+    pub(crate) fn actual_output_length(&self, uuid: Uuid) -> Option<usize> {
+        self.requests
+            .get(&uuid)
+            .map(TraceRequestStats::actual_output_length)
+    }
+
+    /// First scheduler admission `(at_ms, reused_input_tokens)` for `uuid`.
+    pub(crate) fn request_admission(&self, uuid: Uuid) -> Option<(f64, usize)> {
+        let stats = self.requests.get(&uuid)?;
+        Some((
+            stats.first_admit_ms?,
+            stats.first_admission_reused_input_tokens,
+        ))
+    }
+
+    /// Drain measurements while retaining the configuration that applies to
+    /// each reporting epoch of a reusable runtime. The absolute report boundary
+    /// includes idle time in this epoch and starts the next one.
+    pub(crate) fn take_report(&mut self, report_end_ms: f64) -> ReplayReport {
+        debug_assert!(report_end_ms.is_finite() && report_end_ms >= self.report_start_ms);
+        let mut next = Self {
+            completion_feedback: self
+                .completion_feedback
+                .as_ref()
+                .map(|_| Default::default()),
+            report_start_ms: report_end_ms,
+            defer_token_timeline_finalization: self.defer_token_timeline_finalization,
+            capture_per_request: self.capture_per_request,
+            sla: self.sla,
+            static_worker_count: self.static_worker_count,
+            prefill_gpus_per_worker: self.prefill_gpus_per_worker,
+            decode_gpus_per_worker: self.decode_gpus_per_worker,
+            encoder_gpus: self.encoder_gpus,
+            ..Default::default()
+        };
+        if self.batch_reporting {
+            next.begin_batch_reporting();
+        }
+        std::mem::replace(self, next).finish_at(Some(report_end_ms))
+    }
+
+    pub fn finish(self) -> ReplayReport {
+        self.finish_at(None)
+    }
+
+    fn finish_at(mut self, report_end_ms: Option<f64>) -> ReplayReport {
+        if let Some(report) = self.prepared_report.take() {
+            return report;
+        }
+        let mut request_order = self.requests.keys().copied().collect::<Vec<_>>();
+        request_order.sort_unstable_by(|left_uuid, right_uuid| {
+            let left = self
+                .requests
+                .get(left_uuid)
+                .expect("request order must reference retained request");
+            let right = self
+                .requests
+                .get(right_uuid)
+                .expect("request order must reference retained request");
+            left.authored_id
+                .as_deref()
+                .cmp(&right.authored_id.as_deref())
+                .then_with(|| left_uuid.cmp(right_uuid))
+        });
+
+        for uuid in &request_order {
+            let stats = self
+                .requests
+                .get_mut(uuid)
+                .expect("request order must reference retained request");
+            stats.finalize_token_timeline(
+                stats.terminal_status == Some(ReplayTerminalStatus::Completed)
+                    && stats.first_admit_ms.is_some(),
+                &mut self.itl_distribution,
+                &mut self.output_token_throughput_per_user,
+            );
+        }
+
+        // Build per-request records before we move `self.requests` into the
+        // summary aggregation below. Gated on `capture_per_request` — the
+        // ~100ms terminal pass + ~30MB allocation only runs when a caller asks
+        // for per-request output. The summary report is unaffected either way
+        // (custom Serialize impl skips `per_request`).
+        let per_request = if self.capture_per_request {
+            self.per_request_records()
+        } else {
+            Vec::new()
+        };
+        let sla = self.sla;
+        let report_start_ms = self.report_start_ms;
+        let static_worker_count = self.static_worker_count;
+        let accumulated_prefill_worker_seconds = self.prefill_worker_seconds;
+        let accumulated_decode_worker_seconds = self.decode_worker_seconds;
+        let accumulated_encoder_gpu_seconds = self.encoder_gpu_seconds;
+        let prefill_gpus_per_worker = self.prefill_gpus_per_worker;
+        let decode_gpus_per_worker = self.decode_gpus_per_worker;
+        let encoder_gpus = self.encoder_gpus;
+        let runtime_evidence = self.runtime_evidence;
+        let agentic_graph = self.agentic_graph;
+        let agentic_snapshots = self.agentic_snapshots;
+        let agentic_phases = self.agentic_phases;
+        let mut agentic_profile = self.agentic_profile;
+        let agentic_lifecycle = self.agentic_lifecycle;
+        let mut agentic_play_outcomes = self.agentic_play_outcomes;
+        if let Some(origin) = agentic_phases
+            .as_ref()
+            .and_then(|phases| phases.profile_start_ms)
+        {
+            for outcome in agentic_play_outcomes.iter_mut().flatten() {
+                for time in [&mut outcome.causal_terminal_ms, &mut outcome.settled_at_ms]
+                    .into_iter()
+                    .flatten()
+                {
+                    *time -= origin;
+                }
+            }
+        }
+        let trajectories = self
+            .agentic_trajectory
+            .map(|snapshot| TraceTrajectoryStats {
+                total: snapshot.total_trajectories,
+                completed: snapshot.completed_trajectories,
+                incomplete: snapshot
+                    .total_trajectories
+                    .saturating_sub(snapshot.completed_trajectories),
+                e2e: build_distribution_stats(snapshot.e2e_latencies_ms),
+            });
+        let itl_distribution = self.itl_distribution.finish();
+        let output_token_throughput_per_user = self.output_token_throughput_per_user.finish();
+        let requests = self.requests;
+        let request_count = requests.len();
+        let mut ttfts = Vec::with_capacity(request_count);
+        let mut ttft_stage_sums = [0.0f64; 6];
+        let mut ttft_stage_samples = 0usize;
+        let mut encoder_sum_ms = 0.0f64;
+        let mut encoder_samples = 0usize;
+        let mut ttsts = Vec::with_capacity(request_count);
+        let mut tpots = Vec::with_capacity(request_count);
+        let mut e2e_latencies = Vec::with_capacity(request_count);
+        // The profile's terminal boundary includes canceled requests and idle
+        // time, which must still count toward provisioned worker accounting.
+        let mut duration_ms = report_end_ms
+            .into_iter()
+            .chain(
+                agentic_profile
+                    .as_ref()
+                    .and_then(|profile| profile.finished_at_ms),
+            )
+            .reduce(f64::max)
+            .map(|end_ms| (end_ms - report_start_ms).max(0.0))
+            .unwrap_or(0.0);
+        let mut total_input_tokens = 0usize;
+        let mut total_output_tokens = 0usize;
+        let mut completed_requests = 0usize;
+        let mut observed_start_ms: Option<f64> = None;
+        let mut observed_end_ms: Option<f64> = None;
+        let mut total_reused_tokens = 0usize;
+        let mut total_first_admission_reused_tokens = 0usize;
+        // Goodput: completed requests (and their output tokens) that satisfy the SLA.
+        let mut goodput_requests = 0usize;
+        let mut goodput_output_tokens = 0usize;
+
+        for uuid in request_order {
+            let stats = requests
+                .get(&uuid)
+                .expect("request order must reference retained request");
+            if stats.first_admit_ms.is_none() {
+                continue;
+            }
+            if stats.terminal_status != Some(ReplayTerminalStatus::Completed) {
+                continue;
+            }
+            let Some(terminal_time_ms) = stats.terminal_time_ms else {
+                continue;
+            };
+
+            completed_requests += 1;
+            observed_start_ms = Some(observed_start_ms.map_or(stats.arrival_time_ms, |value| {
+                value.min(stats.arrival_time_ms)
+            }));
+            observed_end_ms =
+                Some(observed_end_ms.map_or(terminal_time_ms, |value| value.max(terminal_time_ms)));
+            if let Some(encoder_ready_ms) = stats.encoder_ready_ms {
+                encoder_sum_ms += (encoder_ready_ms - stats.arrival_time_ms).max(0.0);
+                encoder_samples += 1;
+            }
+            total_input_tokens += stats.input_length;
+            let output_length = stats.actual_output_length();
+            total_output_tokens += output_length;
+            total_reused_tokens += stats.reused_input_tokens;
+            total_first_admission_reused_tokens += stats.first_admission_reused_input_tokens;
+            duration_ms = duration_ms.max((terminal_time_ms - report_start_ms).max(0.0));
+
+            let (Some(first_token_ms), Some(last_token_ms)) =
+                (stats.first_token_ms(), stats.last_token_ms())
+            else {
+                let e2e_ms = (terminal_time_ms - stats.arrival_time_ms).max(0.0);
+                if sla.is_set() && sla.is_good_without_tokens(e2e_ms) {
+                    goodput_requests += 1;
+                }
+                continue;
+            };
+
+            let ttft_ms = (first_token_ms - stats.arrival_time_ms).max(0.0);
+            let e2e_ms = (last_token_ms - stats.arrival_time_ms).max(0.0);
+            ttfts.push(ttft_ms);
+            e2e_latencies.push(e2e_ms);
+            // The host stages start where the language rank received the request:
+            // after the encoder pool's delivery when there is one.
+            if let Some(spans) = stats.ttft_milestones.stage_spans(
+                stats.encoder_ready_ms.unwrap_or(stats.arrival_time_ms),
+                first_token_ms,
+            ) {
+                for (sum, value) in ttft_stage_sums.iter_mut().zip(spans) {
+                    *sum += value;
+                }
+                ttft_stage_samples += 1;
+            }
+
+            // Goodput classification (aiperf avg-ITL; see SlaThresholds::is_good).
+            if sla.is_set() && sla.is_good(ttft_ms, e2e_ms, output_length) {
+                goodput_requests += 1;
+                goodput_output_tokens += output_length;
+            }
+
+            if let Some(ttst_ms) = stats.ttst_ms() {
+                ttsts.push(ttst_ms);
+            }
+
+            if let Some(tpot_ms) = stats.mean_tpot_ms() {
+                tpots.push(tpot_ms);
+            }
+        }
+
+        let reporting_duration_s = (duration_ms / 1000.0).max(1e-9);
+        if let Some(profile) = &mut agentic_profile {
+            // Admission duration is a workload control, while throughput uses
+            // the observed successful-request cohort, including grace returns.
+            // Preparation and canceled requests never extend that cohort.
+            duration_ms = observed_start_ms
+                .zip(observed_end_ms)
+                .map_or(0.0, |(start, end)| (end - start).max(0.0));
+            profile.observation_duration_ms = Some(duration_ms);
+            profile.successful_request_throughput =
+                (duration_ms > 0.0).then_some(completed_requests as f64 * 1000.0 / duration_ms);
+        }
+        let num_ttft_samples = ttfts.len();
+        let num_tpot_samples = tpots.len();
+        let num_e2e_latency_samples = e2e_latencies.len();
+        let duration_s = (duration_ms / 1000.0).max(1e-9);
+        // Provisioned worker-seconds and encoder GPU-seconds on one clock:
+        // static count × duration for an externally clocked runtime, else the
+        // runtime-integrated accumulators.
+        let (prefill_worker_seconds, decode_worker_seconds, encoder_gpu_seconds) =
+            match static_worker_count {
+                Some((prefill, decode)) => (
+                    prefill as f64 * reporting_duration_s,
+                    decode as f64 * reporting_duration_s,
+                    reporting_duration_s * encoder_gpus as f64,
+                ),
+                None => (
+                    accumulated_prefill_worker_seconds,
+                    accumulated_decode_worker_seconds,
+                    accumulated_encoder_gpu_seconds,
+                ),
+            };
+        // GPU-hours straight from the mocker's own worker parallelism (no
+        // external GPU-count config). 0 when gpus_per_worker was not set.
+        let gpu_hours = (prefill_worker_seconds * prefill_gpus_per_worker as f64
+            + decode_worker_seconds * decode_gpus_per_worker as f64
+            + encoder_gpu_seconds)
+            / 3600.0;
+        // Goodput only when an SLA was supplied; otherwise it is undefined.
+        let goodput = sla.is_set().then(|| TraceGoodputStats {
+            completed_requests: goodput_requests,
+            request_throughput_rps: goodput_requests as f64 / duration_s,
+            output_throughput_tok_s: goodput_output_tokens as f64 / duration_s,
+        });
+        ReplayReport {
+            kv_eviction_policy: crate::engine::KvEvictionPolicy::Lru,
+            kv_eviction_assumption: None,
+            committed_prefill_tokens: self.committed_prefill_tokens,
+            g3_offload: self
+                .g3_offload
+                .map(|stats| g3_since(stats, self.g3_profile_baseline.as_ref())),
+            kvcr: self.kvcr,
+            g2_domains: self.g2_domains.clone(),
+            request_counts: TraceRequestCounts {
+                num_requests: request_count,
+                completed_requests,
+                total_input_tokens,
+                total_output_tokens,
+            },
+            throughput: TraceThroughputStats {
+                duration_ms,
+                wall_time_ms: 0.0,
+                request_throughput_rps: completed_requests as f64 / duration_s,
+                input_throughput_tok_s: total_input_tokens as f64 / duration_s,
+                output_throughput_tok_s: total_output_tokens as f64 / duration_s,
+                total_throughput_tok_s: (total_input_tokens + total_output_tokens) as f64
+                    / duration_s,
+                prefill_worker_seconds,
+                decode_worker_seconds,
+                prefill_gpus_per_worker,
+                decode_gpus_per_worker,
+                encoder_gpus,
+                gpu_hours,
+            },
+            prefix_cache_reused_ratio: if total_input_tokens == 0 {
+                0.0
+            } else {
+                total_reused_tokens as f64 / total_input_tokens as f64
+            },
+            first_admission_prefix_cache_reused_ratio: if total_input_tokens == 0 {
+                0.0
+            } else {
+                total_first_admission_reused_tokens as f64 / total_input_tokens as f64
+            },
+            latency: TraceLatencyStats {
+                num_ttft_samples,
+                num_tpot_samples,
+                num_e2e_latency_samples,
+                ttft: build_distribution_stats(ttfts),
+                ttst: build_distribution_stats(ttsts),
+                tpot: build_distribution_stats(tpots),
+                itl: TraceInterTokenLatencyStats {
+                    max_ms: itl_distribution.max_ms,
+                    distribution: itl_distribution,
+                },
+                e2e: build_distribution_stats(e2e_latencies),
+                output_token_throughput_per_user,
+                ttft_milestones: TraceTtftStageStats::from_sums(
+                    &ttft_stage_sums,
+                    ttft_stage_samples,
+                ),
+                encoder_latency_ms: (encoder_samples > 0)
+                    .then(|| encoder_sum_ms / encoder_samples as f64),
+            },
+            trajectories,
+            agentic_graph,
+            agentic_snapshots,
+            agentic_phases,
+            agentic_profile,
+            agentic_lifecycle,
+            agentic_play_outcomes,
+            goodput,
+            power: None,
+            power_diagnostics: None,
+            per_request,
+            runtime_evidence,
+        }
+    }
+
+    /// Flatten each retained request into a serializable `PerRequestRecord`.
+    /// Used to emit one JSON object per request to a JSONL file, mirroring
+    /// AIPerf's per-request output shape.
+    ///
+    /// Only requests with a terminal outcome are emitted. Requests truncated
+    /// by a simulation-time cap have no terminal outcome and remain omitted.
+    pub fn per_request_records(&self) -> Vec<PerRequestRecord> {
+        let mut records = Vec::with_capacity(self.requests.len());
+        for (uuid, stats) in &self.requests {
+            let Some(detail) = stats.detail.as_deref() else {
+                continue;
+            };
+            let Some(terminal_status) = stats.terminal_status else {
+                continue;
+            };
+            let Some(terminal_time_ms) = stats.terminal_time_ms else {
+                continue;
+            };
+            let first_token_ms = stats.first_token_ms();
+            let last_token_ms = stats.last_token_ms();
+            records.push(PerRequestRecord {
+                request_id: stats.authored_id.clone(),
+                play_id: stats.play_id.clone(),
+                session_id: stats.session_id.clone(),
+                turn_index: stats.turn_index,
+                metadata: stats.metadata.clone(),
+                agentic: stats.agentic.clone(),
+                agentic_phase: self.agentic_phases.as_ref().and_then(|phases| {
+                    phases.profile_start_ms.map(|_| AgenticReplayPhase::Profile)
+                }),
+                uuid: uuid.to_string(),
+                arrival_time_ms: stats.arrival_time_ms,
+                dispatched_at_ms: stats.dispatched_at_ms,
+                tokenized_ms: stats.tokenized_ms,
+                first_admit_ms: stats.first_admit_ms,
+                terminal_time_ms,
+                first_token_ms,
+                last_token_ms,
+                ttft_ms: first_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
+                ttst_ms: stats.ttst_ms(),
+                e2e_latency_ms: last_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
+                itl_ms: stats.mean_tpot_ms(),
+                input_length: stats.input_length,
+                requested_output_length: stats.requested_output_length,
+                output_length: stats.actual_output_length(),
+                reused_input_tokens: detail
+                    .prefill_reused_input_tokens
+                    .unwrap_or(stats.reused_input_tokens),
+                first_admission_g1_reused_input_tokens: detail
+                    .first_admission_cache_tier_attribution
+                    .map(|value| value.g1_reused_input_tokens),
+                first_admission_host_reused_input_tokens: detail
+                    .first_admission_cache_tier_attribution
+                    .map(|value| value.host_reused_input_tokens),
+                prefill_worker_idx: stats.prefill_worker_idx,
+                decode_worker_idx: stats.decode_worker_idx,
+                prefill_admit_ms: detail.prefill_admit_ms,
+                encoder_ready_ms: stats.encoder_ready_ms,
+                frontend_ready_ms: stats.ttft_milestones.frontend_ready_ms,
+                scheduler_received_ms: stats.ttft_milestones.scheduler_received_ms,
+                selected_ms: stats.ttft_milestones.selected_ms,
+                prefill_complete_ms: stats.ttft_milestones.prefill_complete_ms,
+                source_held_ms: detail.source_held_ms,
+                destination_reserved_ms: detail.destination_reserved_ms,
+                destination_activated_ms: detail.destination_activated_ms,
+                decode_admit_ms: detail.decode_admit_ms,
+                source_released_ms: detail.source_released_ms,
+                decode_reused_input_tokens: detail.decode_reused_input_tokens,
+                prefill_route_overlap_tokens: detail.prefill_route_overlap_tokens,
+                decode_route_overlap_tokens: detail.decode_route_overlap_tokens,
+                routing_history: detail.routing_history.clone(),
+                admission_count: detail.admission_history.len(),
+                readmission_count: detail
+                    .pool_admission_counts
+                    .iter()
+                    .map(|count| count.saturating_sub(1))
+                    .sum(),
+                admission_history: detail.admission_history.clone(),
+                pressure_record_ordinals: detail.pressure_record_ordinals.clone(),
+                terminal_status,
+            });
+        }
+        if let Some(origin) = self
+            .agentic_phases
+            .as_ref()
+            .and_then(|phases| phases.profile_start_ms)
+        {
+            for record in &mut records {
+                record.arrival_time_ms -= origin;
+                record.terminal_time_ms -= origin;
+                for timestamp in [
+                    &mut record.dispatched_at_ms,
+                    &mut record.tokenized_ms,
+                    &mut record.first_admit_ms,
+                    &mut record.first_token_ms,
+                    &mut record.last_token_ms,
+                    &mut record.prefill_admit_ms,
+                    &mut record.source_held_ms,
+                    &mut record.destination_reserved_ms,
+                    &mut record.destination_activated_ms,
+                    &mut record.decode_admit_ms,
+                    &mut record.source_released_ms,
+                    &mut record.encoder_ready_ms,
+                    &mut record.frontend_ready_ms,
+                    &mut record.scheduler_received_ms,
+                    &mut record.selected_ms,
+                    &mut record.prefill_complete_ms,
+                ] {
+                    if let Some(time) = timestamp {
+                        *time -= origin;
+                    }
+                }
+                for routing in &mut record.routing_history {
+                    for timestamp in [
+                        &mut routing.queue_entered_at_ms,
+                        &mut routing.released_at_ms,
+                    ] {
+                        if let Some(time) = timestamp {
+                            *time -= origin;
+                        }
+                    }
+                }
+                for admission in &mut record.admission_history {
+                    admission.at_ms -= origin;
+                }
+            }
+        }
+        // Authored IDs make agentic output stable across equivalent import
+        // paths even when runtime UUIDs differ. Legacy requests retain their
+        // historical arrival-time ordering.
+        records.sort_by(|a, b| {
+            a.request_id
+                .as_deref()
+                .cmp(&b.request_id.as_deref())
+                .then_with(|| a.arrival_time_ms.total_cmp(&b.arrival_time_ms))
+                .then_with(|| a.uuid.cmp(&b.uuid))
+        });
+        records
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self, uuid: Uuid) -> Option<TraceRequestStatsSnapshot> {
+        self.requests
+            .get(&uuid)
+            .map(|stats| TraceRequestStatsSnapshot {
+                arrival_time_ms: stats.arrival_time_ms,
+                first_admit_ms: stats.first_admit_ms,
+                first_token_ms: stats.first_token_ms(),
+                last_token_ms: stats.last_token_ms(),
+                input_length: stats.input_length,
+                requested_output_length: stats.requested_output_length,
+                output_length: stats.actual_output_length(),
+                reused_input_tokens: stats.reused_input_tokens,
+                first_admission_reused_input_tokens: stats.first_admission_reused_input_tokens,
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshots(&self) -> Vec<TraceRequestStatsSnapshot> {
+        self.requests
+            .values()
+            .map(|stats| TraceRequestStatsSnapshot {
+                arrival_time_ms: stats.arrival_time_ms,
+                first_admit_ms: stats.first_admit_ms,
+                first_token_ms: stats.first_token_ms(),
+                last_token_ms: stats.last_token_ms(),
+                input_length: stats.input_length,
+                requested_output_length: stats.requested_output_length,
+                output_length: stats.actual_output_length(),
+                reused_input_tokens: stats.reused_input_tokens,
+                first_admission_reused_input_tokens: stats.first_admission_reused_input_tokens,
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn retained_token_timestamps(&self) -> usize {
+        self.requests
+            .values()
+            .map(|stats| match &stats.token_timeline {
+                TokenTimeline::Recording(times) => times.len(),
+                TokenTimeline::Finalized(_) => 0,
+            })
+            .sum()
+    }
+}
+
+// Cumulative G3 counters cover only the measured time window. Residency and
+// pending-block values are gauges of the preserved cache at report completion.
+fn g3_since(
+    mut stats: crate::engine::G3Stats,
+    baseline: Option<&crate::engine::G3Stats>,
+) -> crate::engine::G3Stats {
+    if let Some(base) = baseline {
+        stats.lookup_probes -= base.lookup_probes;
+        stats.lookup_hits -= base.lookup_hits;
+        stats.lookup_pending -= base.lookup_pending;
+        stats.evictions -= base.evictions;
+        stats.cross_worker_read_blocks -= base.cross_worker_read_blocks;
+        stats.bypassed_restores -= base.bypassed_restores;
+        for (current, previous) in [
+            (&mut stats.read, &base.read),
+            (&mut stats.write, &base.write),
+        ] {
+            current.submitted_jobs -= previous.submitted_jobs;
+            current.completed_jobs -= previous.completed_jobs;
+            current.cancelled_jobs -= previous.cancelled_jobs;
+            current.completed_bytes -= previous.completed_bytes;
+            current.transfer_ms -= previous.transfer_ms;
+        }
+    }
+    stats
+}
+
+fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+}
+
+fn build_distribution_stats(mut values: Vec<f64>) -> TraceDistributionStats {
+    if values.is_empty() {
+        return empty_distribution_stats();
+    }
+
+    let min_ms = values
+        .iter()
+        .copied()
+        .min_by(|left, right| left.total_cmp(right))
+        .expect("non-empty values must have a minimum");
+    let max_ms = values
+        .iter()
+        .copied()
+        .max_by(|left, right| left.total_cmp(right))
+        .expect("non-empty values must have a maximum");
+
+    TraceDistributionStats {
+        mean_ms: mean(&values),
+        min_ms,
+        max_ms,
+        median_ms: percentile_in_place(&mut values, 50.0),
+        p75_ms: percentile_in_place(&mut values, 75.0),
+        p90_ms: percentile_in_place(&mut values, 90.0),
+        p95_ms: percentile_in_place(&mut values, 95.0),
+        p99_ms: percentile_in_place(&mut values, 99.0),
+        std_ms: std_dev(&values),
+    }
+}
+
+fn empty_distribution_stats() -> TraceDistributionStats {
+    TraceDistributionStats {
+        mean_ms: 0.0,
+        min_ms: 0.0,
+        max_ms: 0.0,
+        median_ms: 0.0,
+        p75_ms: 0.0,
+        p90_ms: 0.0,
+        p95_ms: 0.0,
+        p99_ms: 0.0,
+        std_ms: 0.0,
+    }
+}
+
+fn percentile_in_place(values: &mut [f64], percentile: f64) -> f64 {
+    let rank = percentile_rank(values.len(), percentile);
+    let (_, selected, _) = values.select_nth_unstable_by(rank, |left, right| left.total_cmp(right));
+    *selected
+}
+
+fn percentile_rank(len: usize, percentile: f64) -> usize {
+    let rank = ((len - 1) as f64 * percentile / 100.0).round() as usize;
+    rank.min(len - 1)
+}
+
+fn std_dev(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    let mean = mean(values);
+    let variance = values
+        .iter()
+        .map(|value| {
+            let centered = value - mean;
+            centered * centered
+        })
+        .sum::<f64>()
+        / values.len() as f64;
+    variance.sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warmup_report_excludes_preparation_and_rebases_profile_timestamps() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        let primer = Uuid::from_u128(1_u128 << 127);
+        collector.on_arrival(primer, 0.0, 128, 1);
+        collector.on_admit(primer, 1.0, 0);
+        collector.on_token(primer, 90.0);
+        collector.on_terminal(primer, 90.0, ReplayTerminalStatus::Completed);
+        assert_eq!(
+            collector
+                .take_report(100.0)
+                .request_counts
+                .completed_requests,
+            1
+        );
+        collector.set_agentic_phases(AgenticPhaseEvidence {
+            warmup_policy: super::super::loadgen::AgenticWarmupPolicy::RepeatedPrefixes,
+            schema: super::super::loadgen::AGENTIC_PHASE_SCHEMA_V1,
+            phase: AgenticReplayPhase::Profile,
+            barrier_condition: "all_preparation_quiescent",
+            profile_start_ms: Some(100.0),
+            finished_at_ms: Some(100.0),
+            failure_request_id: None,
+            failure_reason: None,
+            lanes: vec![],
+            requests: vec![],
+        });
+        // A late event for a preparation UUID cannot add a measured request.
+        collector.on_token(primer, 105.0);
+        collector.on_terminal(primer, 106.0, ReplayTerminalStatus::Completed);
+        let profile = Uuid::from_u128(1);
+        collector.on_arrival(profile, 110.0, 128, 2);
+        collector.on_agentic_metadata(profile, "after".into(), "play".into(), 110.0);
+        collector.on_prefill_admit(profile, 115.0, 64, None);
+        collector.on_source_held(profile, 120.0);
+        collector.on_destination_reserved(profile, 122.0);
+        collector.on_destination_activated(profile, 125.0);
+        collector.on_decode_admit(profile, 126.0, 64, None);
+        collector.on_source_released(profile, 127.0);
+        collector.on_token(profile, 130.0);
+        collector.on_token(profile, 140.0);
+        collector.on_terminal(profile, 140.0, ReplayTerminalStatus::Completed);
+        collector.set_agentic_play_outcomes(vec![
+            AgenticPlayOutcome {
+                play_id: "play".into(),
+                status: super::super::loadgen::AgenticPlayStatus::Completed,
+                causal_terminal_ms: Some(140.0),
+                settled_at_ms: Some(145.0),
+                failure_request_id: None,
+                failure_status: None,
+            },
+            AgenticPlayOutcome {
+                play_id: "still-running".into(),
+                status: super::super::loadgen::AgenticPlayStatus::Incomplete,
+                causal_terminal_ms: None,
+                settled_at_ms: None,
+                failure_request_id: None,
+                failure_status: None,
+            },
+        ]);
+        let report = collector.finish();
+        assert_eq!(report.request_counts.num_requests, 1);
+        assert_eq!(report.request_counts.completed_requests, 1);
+        assert_eq!(report.throughput.duration_ms, 40.0);
+        assert_eq!(report.first_admission_prefix_cache_reused_ratio, 0.5);
+        let record = &report.per_request[0];
+        assert_eq!(record.agentic_phase, Some(AgenticReplayPhase::Profile));
+        assert_eq!(record.arrival_time_ms, 10.0);
+        assert_eq!(record.dispatched_at_ms, Some(10.0));
+        assert_eq!(record.first_admit_ms, Some(15.0));
+        assert_eq!(record.terminal_time_ms, 40.0);
+        assert_eq!(record.first_token_ms, Some(30.0));
+        assert_eq!(record.last_token_ms, Some(40.0));
+        assert_eq!(record.source_held_ms, Some(20.0));
+        assert_eq!(record.destination_reserved_ms, Some(22.0));
+        assert_eq!(record.destination_activated_ms, Some(25.0));
+        assert_eq!(record.decode_admit_ms, Some(26.0));
+        assert_eq!(record.source_released_ms, Some(27.0));
+        assert_eq!(record.admission_history[0].at_ms, 15.0);
+        assert_eq!(record.ttft_ms, Some(20.0));
+        assert_eq!(record.e2e_latency_ms, Some(30.0));
+        assert_eq!(record.itl_ms, Some(10.0));
+        let outcomes = report.agentic_play_outcomes.as_ref().unwrap();
+        assert_eq!(
+            outcomes[0].causal_terminal_ms,
+            Some(record.terminal_time_ms)
+        );
+        assert_eq!(outcomes[0].settled_at_ms, Some(45.0));
+        assert_eq!(outcomes[1].causal_terminal_ms, None);
+        assert_eq!(outcomes[1].settled_at_ms, None);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["agentic_phases"]["profile_start_ms"],
+            100.0
+        );
+    }
+
+    #[test]
+    fn g3_profile_baseline_preserves_cache_gauges() {
+        let base = crate::engine::G3Stats {
+            lookup_probes: 10,
+            lookup_hits: 8,
+            resident_blocks: 8,
+            pending_blocks: 1,
+            write: crate::engine::G3IoStats {
+                completed_bytes: 2048,
+                transfer_ms: 4.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut current = base.clone();
+        current.lookup_probes += 3;
+        current.lookup_hits += 2;
+        current.write.completed_bytes += 1024;
+        current.write.transfer_ms += 2.0;
+        current.resident_blocks = 12;
+        current.pending_blocks = 0;
+        let measured = g3_since(current, Some(&base));
+        assert_eq!(measured.lookup_probes, 3);
+        assert_eq!(measured.lookup_hits, 2);
+        assert_eq!(measured.write.completed_bytes, 1024);
+        assert_eq!(measured.write.transfer_ms, 2.0);
+        assert_eq!(measured.resident_blocks, 12);
+        assert_eq!(measured.pending_blocks, 0);
+    }
+
+    fn build_distribution_stats_sorted(values: &[f64]) -> TraceDistributionStats {
+        if values.is_empty() {
+            return TraceDistributionStats {
+                mean_ms: 0.0,
+                min_ms: 0.0,
+                max_ms: 0.0,
+                median_ms: 0.0,
+                p75_ms: 0.0,
+                p90_ms: 0.0,
+                p95_ms: 0.0,
+                p99_ms: 0.0,
+                std_ms: 0.0,
+            };
+        }
+
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|left, right| left.total_cmp(right));
+        TraceDistributionStats {
+            mean_ms: mean(values),
+            min_ms: sorted[0],
+            max_ms: *sorted.last().expect("sorted values must be non-empty"),
+            median_ms: sorted[percentile_rank(sorted.len(), 50.0)],
+            p75_ms: sorted[percentile_rank(sorted.len(), 75.0)],
+            p90_ms: sorted[percentile_rank(sorted.len(), 90.0)],
+            p95_ms: sorted[percentile_rank(sorted.len(), 95.0)],
+            p99_ms: sorted[percentile_rank(sorted.len(), 99.0)],
+            std_ms: std_dev(values),
+        }
+    }
+
+    #[test]
+    fn batch_preparation_retains_admissions_then_profile_retires_requests() {
+        let mut collector = TraceCollector::default();
+        collector.begin_batch_preparation_reporting();
+        let primer = Uuid::from_u128(1);
+        collector.try_on_arrival(primer, 0.0, 64, 1).unwrap();
+        collector.on_admit(primer, 1.0, 0);
+        collector.on_token(primer, 2.0);
+        collector.on_terminal(primer, 2.0, ReplayTerminalStatus::Completed);
+        collector
+            .try_on_arrival(Uuid::from_u128(2), 3.0, 64, 1)
+            .unwrap();
+        assert_eq!(collector.request_admission(primer), Some((1.0, 0)));
+        collector.take_report(100.0);
+        assert!(collector.is_batch_reporting());
+        assert!(collector.bounded_summary.is_some());
+
+        let profile = Uuid::from_u128(3);
+        collector.try_on_arrival(profile, 100.0, 128, 1).unwrap();
+        collector.on_admit(profile, 101.0, 64);
+        collector.on_token(profile, 102.0);
+        collector.on_terminal(profile, 102.0, ReplayTerminalStatus::Completed);
+        collector
+            .try_on_arrival(Uuid::from_u128(4), 103.0, 128, 1)
+            .unwrap();
+        assert!(!collector.contains_request(primer));
+        assert!(!collector.contains_request(profile));
+        collector.prepare_batch_report().unwrap();
+        let report = collector.finish();
+        assert_eq!(report.request_counts.num_requests, 2);
+        assert_eq!(report.request_counts.completed_requests, 1);
+        assert_eq!(report.throughput.duration_ms, 2.0);
+        assert_eq!(report.throughput.request_throughput_rps, 500.0);
+        assert_eq!(report.first_admission_prefix_cache_reused_ratio, 0.5);
+    }
+
+    #[test]
+    fn batch_summary_retires_completed_records_and_preserves_report() {
+        let mut baseline = TraceCollector::default();
+        let mut bounded = TraceCollector::default();
+        bounded.begin_batch_reporting();
+        for index in 1..=20_000 {
+            for collector in [&mut baseline, &mut bounded] {
+                let uuid = Uuid::from_u128(index);
+                collector.try_on_arrival(uuid, index as f64, 16, 3).unwrap();
+                collector.on_admit(uuid, index as f64 + 1.0, 0);
+                for offset in [10.0, 20.0, 30.0] {
+                    collector.on_token(uuid, index as f64 + offset);
+                }
+                collector.on_terminal(uuid, index as f64 + 30.0, ReplayTerminalStatus::Completed);
+            }
+            assert!(bounded.requests.len() <= 1);
+        }
+        bounded.prepare_batch_report().unwrap();
+        assert!(bounded.requests.is_empty());
+        assert_eq!(
+            serde_json::to_value(baseline.finish()).unwrap(),
+            serde_json::to_value(bounded.finish()).unwrap()
+        );
+    }
+
+    #[rstest::rstest]
+    fn profile_bounded_summary_preserves_worker_accounting(
+        #[values(false, true)] static_workers: bool,
+        #[values(false, true)] successful_request: bool,
+        #[values(0.0, 1000.0)] epoch_start_ms: f64,
+    ) {
+        use crate::replay::loadgen::{AgenticProfileOptions, AgenticProfileReport};
+        let profile = AgenticProfileReport {
+            schema: "aisimulate.agentic.profile.v1",
+            options: AgenticProfileOptions {
+                duration_seconds: 0.03,
+                response_grace_seconds: 0.07,
+                ..Default::default()
+            },
+            profile_start_ms: Some(epoch_start_ms),
+            admission_cutoff_ms: Some(epoch_start_ms + 30.0),
+            response_grace_deadline_ms: Some(epoch_start_ms + 100.0),
+            cancel_drain_deadline_ms: Some(epoch_start_ms + 10_100.0),
+            admission_closed: true,
+            finished_at_ms: Some(epoch_start_ms + 100.0),
+            cancel_drain_timed_out: false,
+            unsettled_server_requests: 0,
+            plays_started: 1,
+            client_completed_plays: 1,
+            retired_plays: 1,
+            server_quiescent_plays: 1,
+            issued_requests: 1 + usize::from(successful_request),
+            successful_responses: usize::from(successful_request),
+            canceled_requests: 1,
+            never_issued_requests: 0,
+            client_in_flight_requests: 0,
+            server_unsettled_requests: 0,
+            first_request_ms: Some(epoch_start_ms),
+            last_successful_response_ms: successful_request.then_some(epoch_start_ms + 50.0),
+            observation_duration_ms: None,
+            successful_request_throughput: None,
+            corpus_cursor: 1,
+            idle_shifts: Vec::new(),
+        };
+        let run = |capture| {
+            let mut collector = TraceCollector::default();
+            collector.take_report(epoch_start_ms);
+            collector.set_capture_per_request(capture);
+            collector.begin_batch_reporting();
+            collector.set_gpus_per_worker(4, 8);
+            if static_workers {
+                collector.set_static_worker_count(2, 3);
+            } else {
+                collector.add_worker_seconds(1.2, 2.3);
+            }
+            // A canceled request starts earlier and finishes later than the
+            // successful cohort; neither endpoint extends observation time.
+            let canceled = Uuid::from_u128(1);
+            collector
+                .try_on_arrival(canceled, epoch_start_ms, 32, 1)
+                .unwrap();
+            collector.on_admit(canceled, epoch_start_ms + 1.0, 0);
+            if successful_request {
+                let completed = Uuid::from_u128(2);
+                collector
+                    .try_on_arrival(completed, epoch_start_ms + 10.0, 32, 1)
+                    .unwrap();
+                collector.on_admit(completed, epoch_start_ms + 11.0, 0);
+                collector.on_token(completed, epoch_start_ms + 50.0);
+                collector.on_terminal(
+                    completed,
+                    epoch_start_ms + 50.0,
+                    ReplayTerminalStatus::Completed,
+                );
+            }
+            collector.on_terminal(
+                canceled,
+                epoch_start_ms + 100.0,
+                ReplayTerminalStatus::Canceled,
+            );
+            collector.set_agentic_profile(profile.clone());
+            collector.prepare_batch_report().unwrap();
+            collector.finish()
+        };
+        let detailed = run(true);
+        let summary = run(false);
+        assert_eq!(
+            summary.throughput.duration_ms,
+            if successful_request { 40.0 } else { 0.0 }
+        );
+        assert_eq!(
+            summary.throughput.request_throughput_rps,
+            if successful_request { 25.0 } else { 0.0 }
+        );
+        let (prefill, decode) = if static_workers {
+            (0.2, 0.3)
+        } else {
+            (1.2, 2.3)
+        };
+        assert!((summary.throughput.prefill_worker_seconds - prefill).abs() < 1e-12);
+        assert!((summary.throughput.decode_worker_seconds - decode).abs() < 1e-12);
+        assert!(
+            (summary.throughput.gpu_hours - (prefill * 4.0 + decode * 8.0) / 3600.0).abs() < 1e-12
+        );
+        assert_eq!(
+            serde_json::to_value(summary).unwrap(),
+            serde_json::to_value(detailed).unwrap()
+        );
+    }
+
+    #[test]
+    fn detailed_batch_reporting_preserves_records_past_the_previous_cap() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        collector.begin_batch_reporting();
+        let request_count = 100_001;
+        // Reverse arrival insertion also checks that the existing output
+        // ordering is preserved, rather than switching to completion order.
+        for index in (0..request_count).rev() {
+            let uuid = Uuid::from_u128(index as u128);
+            collector.try_on_arrival(uuid, index as f64, 1, 1).unwrap();
+            collector.on_admit(uuid, index as f64, 0);
+            collector.on_token(uuid, index as f64 + 1.0);
+            collector.on_terminal(uuid, index as f64 + 1.0, ReplayTerminalStatus::Completed);
+        }
+        collector.prepare_batch_report().unwrap();
+        let report = collector.finish();
+        assert_eq!(report.request_counts.num_requests, request_count);
+        assert_eq!(report.request_counts.completed_requests, request_count);
+        assert_eq!(report.request_counts.total_output_tokens, request_count);
+        assert_eq!(report.per_request.len(), request_count);
+        for (index, record) in report.per_request.iter().enumerate() {
+            assert_eq!(record.uuid, Uuid::from_u128(index as u128).to_string());
+            assert_eq!(record.arrival_time_ms, index as f64);
+            assert_eq!(record.output_length, 1);
+            assert_eq!(record.terminal_status, ReplayTerminalStatus::Completed);
+        }
+    }
+
+    #[rstest::rstest]
+    fn completed_record_retirement_preserves_live_requests_and_step_queries(
+        #[values(false, true)] batch_reporting: bool,
+    ) {
+        let mut collector = TraceCollector::default();
+        if batch_reporting {
+            collector.begin_batch_reporting();
+        }
+        let [completed, active, next] = [1, 2, 3].map(Uuid::from_u128);
+        for uuid in [completed, active] {
+            collector.try_on_arrival(uuid, 0.0, 1, 1).unwrap();
+            collector.on_admit(uuid, 1.0, 0);
+        }
+        collector.on_token(completed, 2.0);
+        collector.on_terminal(completed, 2.0, ReplayTerminalStatus::Completed);
+        // Completion callbacks can still read this request's finished stats.
+        assert_eq!(collector.actual_output_length(completed), Some(1));
+        collector.try_on_arrival(next, 3.0, 1, 1).unwrap();
+        assert_eq!(collector.contains_request(completed), !batch_reporting);
+        assert!(collector.contains_request(active));
+        assert!(collector.contains_request(next));
+        collector.on_admit(next, 3.0, 0);
+        for uuid in [active, next] {
+            collector.on_token(uuid, 4.0);
+            collector.on_terminal(uuid, 4.0, ReplayTerminalStatus::Completed);
+        }
+        collector.prepare_batch_report().unwrap();
+        let report = collector.finish();
+        assert_eq!(report.request_counts.num_requests, 3);
+        assert_eq!(report.request_counts.completed_requests, 3);
+        assert_eq!(report.request_counts.total_output_tokens, 3);
+    }
+
+    #[test]
+    fn build_distribution_stats_matches_sorted_baseline() {
+        let values = vec![
+            0.0, 1.0, 1.0, 2.5, 4.0, 4.0, 7.25, 9.5, 15.0, 22.0, 22.0, 100.0,
+        ];
+
+        let expected = build_distribution_stats_sorted(&values);
+        let actual = build_distribution_stats(values);
+
+        assert_eq!(actual.mean_ms, expected.mean_ms);
+        assert_eq!(actual.min_ms, expected.min_ms);
+        assert_eq!(actual.max_ms, expected.max_ms);
+        assert_eq!(actual.median_ms, expected.median_ms);
+        assert_eq!(actual.p75_ms, expected.p75_ms);
+        assert_eq!(actual.p90_ms, expected.p90_ms);
+        assert_eq!(actual.p95_ms, expected.p95_ms);
+        assert_eq!(actual.p99_ms, expected.p99_ms);
+        assert_eq!(actual.std_ms, expected.std_ms);
+    }
+
+    #[test]
+    fn built_in_ddsketch_configuration_and_quantiles_are_valid() {
+        let mut distribution = StreamingDistribution::default();
+        assert!((distribution.sketch.alpha() - DDSKETCH_RELATIVE_ACCURACY).abs() < f64::EPSILON);
+        for percentile in [50.0, 75.0, 90.0, 95.0, 99.0] {
+            assert_eq!(distribution.percentile(percentile), 0.0);
+        }
+
+        // This is wider than any plausible replay latency or token-rate
+        // range, and stays below the configured store's ~10^28 span.
+        for value in [1e-9, 1e18] {
+            distribution.add(value);
+        }
+        for (quantile, expected) in [(0.0, 1e-9), (1.0, 1e18)] {
+            let actual = distribution.sketch.quantile(quantile).unwrap();
+            assert!((actual - expected).abs() <= expected * DDSKETCH_RELATIVE_ACCURACY);
+        }
+    }
+
+    #[test]
+    fn streaming_distribution_preserves_all_zero_samples() {
+        let mut distribution = StreamingDistribution::default();
+        for _ in 0..128 {
+            distribution.add(0.0);
+        }
+
+        assert_eq!(distribution.sketch.get_zero_count(), 128);
+        let stats = distribution.finish();
+        for value in [
+            stats.mean_ms,
+            stats.min_ms,
+            stats.max_ms,
+            stats.median_ms,
+            stats.p75_ms,
+            stats.p90_ms,
+            stats.p95_ms,
+            stats.p99_ms,
+            stats.std_ms,
+        ] {
+            assert_eq!(value, 0.0);
+        }
+    }
+
+    #[test]
+    fn streaming_percentiles_select_the_historical_rounded_rank() {
+        let percentiles = [
+            0.0, 1.0, 10.0, 25.0, 49.0, 50.0, 51.0, 75.0, 90.0, 95.0, 99.0, 100.0,
+        ];
+        for len in [2, 3, 4, 5, 10, 11, 100, 101, 256, 257] {
+            let values = (0..len)
+                .map(|index| 1_000.0 + index as f64 * 10.0)
+                .collect::<Vec<_>>();
+            let mut distribution = StreamingDistribution::default();
+            for &value in &values {
+                distribution.add(value);
+            }
+
+            for percentile in percentiles {
+                let expected = values[percentile_rank(values.len(), percentile)];
+                let actual = distribution.percentile(percentile);
+                assert!(
+                    (actual - expected).abs() <= expected * DDSKETCH_RELATIVE_ACCURACY,
+                    "len={len} percentile={percentile}: expected rank value {expected}, got {actual}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn completed_zero_output_request_counts_without_latency_samples() {
+        let mut collector = TraceCollector::default();
+        collector.set_static_worker_count(0, 1);
+        collector.set_gpus_per_worker(0, 4);
+        let uuid = Uuid::from_u128(99);
+        collector.on_arrival(uuid, 0.0, 32, 0);
+        collector.on_admit(uuid, 5.0, 8);
+        collector.on_terminal(uuid, 25.0, ReplayTerminalStatus::Completed);
+
+        let report = collector.finish();
+
+        assert_eq!(report.request_counts.completed_requests, 1);
+        assert_eq!(report.request_counts.total_input_tokens, 32);
+        assert_eq!(report.request_counts.total_output_tokens, 0);
+        assert_eq!(report.throughput.duration_ms, 25.0);
+        assert_eq!(report.throughput.decode_worker_seconds, 0.025);
+        assert!((report.throughput.gpu_hours - 0.1 / 3600.0).abs() < 1e-12);
+        assert_eq!(report.latency.num_ttft_samples, 0);
+        assert_eq!(report.latency.num_tpot_samples, 0);
+        assert_eq!(report.latency.num_e2e_latency_samples, 0);
+        assert_eq!(report.latency.ttft.mean_ms, 0.0);
+        assert_eq!(report.latency.e2e.mean_ms, 0.0);
+
+        let summary = serde_json::to_value(&report).unwrap();
+        assert_eq!(summary["num_ttft_samples"], 0);
+        assert_eq!(summary["num_tpot_samples"], 0);
+        assert_eq!(summary["num_e2e_latency_samples"], 0);
+    }
+
+    #[test]
+    fn power_display_rejects_invalid_statistics_before_writing() {
+        use std::fmt::Write;
+
+        for (power_w, coverage) in [
+            (Some(500.0), 0.89),
+            (Some(f64::NAN), 1.0),
+            (Some(f64::INFINITY), 1.0),
+            (Some(0.0), 1.0),
+            (Some(-1.0), 1.0),
+            (None, f64::NAN),
+            (None, f64::INFINITY),
+            (None, -0.1),
+            (None, 1.1),
+        ] {
+            let report = TraceCollector::default()
+                .finish()
+                .with_power(Some(TracePowerStats { power_w, coverage }));
+            let mut output = String::new();
+            assert!(write!(&mut output, "{report}").is_err());
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
+    fn power_serialization_preserves_coverage_and_fails_closed() {
+        let available = TraceCollector::default()
+            .finish()
+            .with_power(Some(TracePowerStats {
+                power_w: Some(487.5),
+                coverage: 0.95,
+            }));
+        let summary = serde_json::to_value(&available).unwrap();
+        assert_eq!(summary["power_w"], 487.5);
+        assert_eq!(summary["power_coverage"], 0.95);
+
+        let unavailable = TraceCollector::default()
+            .finish()
+            .with_power(Some(TracePowerStats {
+                power_w: None,
+                coverage: 0.42,
+            }));
+        let summary = serde_json::to_value(&unavailable).unwrap();
+        assert_eq!(summary.get("power_w"), Some(&Value::Null));
+        assert_eq!(summary["power_coverage"], 0.42);
+
+        let absent = TraceCollector::default().finish();
+        assert_eq!(absent.power, None);
+        assert_eq!(absent.power_diagnostics, None);
+        let summary = serde_json::to_value(&absent).unwrap();
+        assert_eq!(summary.get("power_w"), Some(&Value::Null));
+        assert_eq!(summary.get("power_coverage"), Some(&Value::Null));
+        assert!(summary.get("power_diagnostics").is_none());
+
+        let diagnostics = ReplayPowerDiagnostics {
+            schema_version: "1.0",
+            scope: "active_forward_pass_per_gpu",
+            power_w_unit: "W",
+            energy_unit: "W-ms",
+            latency_unit: "ms",
+            coverage_gate: POWER_DATA_COVERAGE_THRESHOLD,
+            publication_status: "unsupported",
+            energy_wms: None,
+            latency_ms: None,
+            covered_latency_ms: None,
+            power_w: None,
+            power_coverage: None,
+            unavailable_reason: Some("timing provider has no operation-energy evidence"),
+            phases: Vec::new(),
+        };
+        let typed = TraceCollector::default()
+            .finish()
+            .with_power_diagnostics(Some(diagnostics.clone()));
+        assert_eq!(typed.power_diagnostics, Some(diagnostics));
+        let summary = serde_json::to_value(&typed).unwrap();
+        assert_eq!(summary["power_diagnostics"]["schema_version"], "1.0");
+        assert_eq!(
+            summary["power_diagnostics"]["publication_status"],
+            "unsupported"
+        );
+    }
+
+    #[test]
+    fn token_before_simulation_cap_does_not_count_as_completion() {
+        let mut collector = TraceCollector::default();
+        let uuid = Uuid::from_u128(100);
+        collector.on_arrival(uuid, 0.0, 32, 4);
+        collector.on_admit(uuid, 5.0, 0);
+        collector.on_token(uuid, 25.0);
+
+        let report = collector.finish();
+
+        assert_eq!(report.request_counts.completed_requests, 0);
+        assert_eq!(report.request_counts.total_input_tokens, 0);
+        assert_eq!(report.request_counts.total_output_tokens, 0);
+        assert_eq!(report.throughput.duration_ms, 0.0);
+    }
+
+    #[test]
+    fn zero_output_goodput_requires_e2e_only_sla() {
+        let collect = |sla| {
+            let mut collector = TraceCollector::default();
+            collector.set_sla_thresholds(sla);
+            let uuid = Uuid::from_u128(101);
+            collector.on_arrival(uuid, 0.0, 32, 0);
+            collector.on_admit(uuid, 5.0, 0);
+            collector.on_terminal(uuid, 100.0, ReplayTerminalStatus::Completed);
+            collector.finish().goodput.unwrap().completed_requests
+        };
+
+        assert_eq!(
+            collect(SlaThresholds {
+                e2e_ms: Some(100.0),
+                ..Default::default()
+            }),
+            1
+        );
+        assert_eq!(
+            collect(SlaThresholds {
+                ttft_ms: Some(1_000.0),
+                ..Default::default()
+            }),
+            0
+        );
+    }
+
+    /// With per-request capture on, a standard disagg-style request lifecycle
+    /// (arrival → admit → prefill_assigned → decode_assigned → tokens) yields
+    /// exactly one record with all fields populated correctly.
+    #[test]
+    fn per_request_disagg_record_populates_all_fields() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        let uuid = Uuid::from_u128(1);
+        collector.on_arrival(uuid, 0.0, 100, 4);
+        collector.on_prefill_route_overlap(uuid, 64);
+        collector.on_prefill_admit(uuid, 5.0, 30, None);
+        collector.on_source_held(uuid, 10.0);
+        collector.on_destination_reserved(uuid, 12.0);
+        collector.on_destination_activated(uuid, 20.0);
+        collector.on_source_released(uuid, 21.0);
+        collector.on_decode_route_overlap(uuid, 32);
+        collector.on_decode_admit(uuid, 25.0, 40, None);
+        collector.on_prefill_assigned(uuid, 2);
+        collector.on_decode_assigned(uuid, 7);
+        collector.on_token(uuid, 50.0);
+        collector.on_token(uuid, 60.0);
+        collector.on_token(uuid, 75.0);
+        collector.on_token(uuid, 95.0);
+        collector.on_terminal(uuid, 95.0, ReplayTerminalStatus::Completed);
+
+        let report = collector.finish();
+        assert_eq!(report.per_request.len(), 1);
+        let rec = &report.per_request[0];
+        assert_eq!(rec.uuid, uuid.to_string());
+        assert_eq!(rec.arrival_time_ms, 0.0);
+        assert_eq!(rec.first_admit_ms, Some(5.0));
+        assert_eq!(rec.terminal_time_ms, 95.0);
+        assert_eq!(rec.first_token_ms, Some(50.0));
+        assert_eq!(rec.last_token_ms, Some(95.0));
+        assert_eq!(rec.ttft_ms, Some(50.0));
+        assert_eq!(rec.ttst_ms, Some(10.0));
+        assert_eq!(rec.e2e_latency_ms, Some(95.0));
+        // Mean per-token gap across 4 tokens: (10 + 15 + 20) / 3 = 15.0
+        assert_eq!(rec.itl_ms, Some(15.0));
+        assert_eq!(rec.input_length, 100);
+        assert_eq!(rec.output_length, 4);
+        assert_eq!(rec.reused_input_tokens, 30);
+        assert_eq!(rec.prefill_worker_idx, Some(2));
+        assert_eq!(rec.decode_worker_idx, Some(7));
+        assert_eq!(rec.prefill_admit_ms, Some(5.0));
+        assert_eq!(rec.source_held_ms, Some(10.0));
+        assert_eq!(rec.destination_reserved_ms, Some(12.0));
+        assert_eq!(rec.destination_activated_ms, Some(20.0));
+        assert_eq!(rec.source_released_ms, Some(21.0));
+        assert_eq!(rec.decode_admit_ms, Some(25.0));
+        assert_eq!(rec.decode_reused_input_tokens, Some(40));
+        assert_eq!(rec.prefill_route_overlap_tokens, Some(64));
+        assert_eq!(rec.decode_route_overlap_tokens, Some(32));
+        assert_eq!(rec.terminal_status, ReplayTerminalStatus::Completed);
+    }
+
+    #[test]
+    fn per_request_route_records_overlap_regret_and_policy_replica() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        let uuid = Uuid::from_u128(2);
+        collector.on_arrival(uuid, 0.0, 2_048, 1);
+        collector.on_route_immediate(
+            uuid,
+            ReplayRequestPool::Agg,
+            3,
+            3,
+            0,
+            1_024,
+            Some(PlacementCacheSample {
+                overlap_blocks: 4,
+                best_available_overlap_blocks: 7,
+                isl_blocks: 8,
+            }),
+            Some(1),
+        );
+        collector.on_terminal(uuid, 1.0, ReplayTerminalStatus::Completed);
+
+        let report = collector.finish();
+        let route = &report.per_request[0].routing_history[0];
+        assert_eq!(route.selected_overlap_blocks, Some(4));
+        assert_eq!(route.best_available_overlap_blocks, Some(7));
+        assert_eq!(route.overlap_regret_blocks, Some(3));
+        assert_eq!(route.placement_replica_id, Some(1));
+    }
+
+    /// A conditional-prefill bypass is reflected by `prefill_worker_idx ==
+    /// None` while `decode_worker_idx` is set. This is how downstream tooling
+    /// distinguishes bypassed requests from standard disagg flow.
+    #[test]
+    fn per_request_bypass_leaves_prefill_worker_idx_none() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        let uuid = Uuid::from_u128(42);
+        collector.on_arrival(uuid, 0.0, 100, 2);
+        collector.on_admit(uuid, 5.0, 0);
+        // No on_prefill_assigned call — request bypassed remote prefill.
+        collector.on_decode_assigned(uuid, 1);
+        collector.on_token(uuid, 30.0);
+        collector.on_token(uuid, 45.0);
+        collector.on_terminal(uuid, 45.0, ReplayTerminalStatus::Completed);
+
+        let report = collector.finish();
+        assert_eq!(report.per_request.len(), 1);
+        let rec = &report.per_request[0];
+        assert!(
+            rec.prefill_worker_idx.is_none(),
+            "bypassed request must have prefill_worker_idx = None"
+        );
+        assert_eq!(rec.decode_worker_idx, Some(1));
+    }
+
+    /// Default: capture is off, so `per_request` is empty and the ~100ms
+    /// terminal pass is skipped. The summary report is otherwise identical.
+    #[test]
+    fn per_request_default_off() {
+        let mut collector = TraceCollector::default();
+        // Note: NOT calling set_capture_per_request — capture stays false.
+        let uuid = Uuid::from_u128(1);
+        collector.on_arrival(uuid, 0.0, 100, 2);
+        collector.on_admit_with_tier_attribution(
+            uuid,
+            5.0,
+            20,
+            Some(CacheTierAttribution {
+                g1_reused_input_tokens: 12,
+                host_reused_input_tokens: 8,
+            }),
+        );
+        collector.on_decode_assigned(uuid, 0);
+        collector.on_token(uuid, 50.0);
+        collector.on_token(uuid, 60.0);
+        collector.on_terminal(uuid, 60.0, ReplayTerminalStatus::Completed);
+
+        assert!(collector.requests[&uuid].detail.is_none());
+
+        let report = collector.finish();
+        assert!(report.per_request.is_empty());
+        // Summary stats still work.
+        assert_eq!(report.request_counts.completed_requests, 1);
+        assert_eq!(report.prefix_cache_reused_ratio, 0.2);
+        assert_eq!(report.first_admission_prefix_cache_reused_ratio, 0.2);
+    }
+
+    /// Register a completed request: arrival, output length (osl), and the
+    /// explicit per-output-token timestamps (first → ttft, last → e2e).
+    fn add_completed(
+        collector: &mut TraceCollector,
+        uuid_n: u128,
+        arrival_ms: f64,
+        output_length: usize,
+        token_times_ms: &[f64],
+    ) {
+        let uuid = Uuid::from_u128(uuid_n);
+        collector.on_arrival(uuid, arrival_ms, 100, output_length);
+        collector.on_admit(uuid, arrival_ms, 0);
+        collector.on_decode_assigned(uuid, 0);
+        for &t in token_times_ms {
+            collector.on_token(uuid, t);
+        }
+        let terminal_time_ms = token_times_ms.last().copied().unwrap_or(arrival_ms);
+        collector.on_terminal(uuid, terminal_time_ms, ReplayTerminalStatus::Completed);
+    }
+
+    /// Goodput classifies a request "good" using aiperf's average ITL,
+    /// `avg_itl = (e2e − ttft) / (osl − 1)`, and skips the ITL check when
+    /// `osl ≤ 1`.
+    #[test]
+    fn goodput_classifies_by_aiperf_avg_itl() {
+        let mut collector = TraceCollector::default();
+        collector.set_sla_thresholds(SlaThresholds {
+            ttft_ms: Some(150.0),
+            itl_ms: Some(30.0),
+            e2e_ms: None,
+        });
+        // A: ttft=100, e2e=200, osl=3 → avg_itl=(200−100)/2=50 > 30 → BAD.
+        add_completed(&mut collector, 1, 0.0, 3, &[100.0, 150.0, 200.0]);
+        // B: ttft=100, e2e=140, osl=3 → avg_itl=20 ≤ 30, ttft ok → GOOD.
+        add_completed(&mut collector, 2, 0.0, 3, &[100.0, 120.0, 140.0]);
+        // C: osl=1 → ITL check skipped; ttft=100 ≤ 150 → GOOD.
+        add_completed(&mut collector, 3, 0.0, 1, &[100.0]);
+
+        let goodput = collector
+            .finish()
+            .goodput
+            .expect("SLA set → goodput present");
+        assert_eq!(goodput.completed_requests, 2); // B and C
+        // duration = max last token = 200ms → 0.2s; good output tokens = 3 (B) + 1 (C) = 4.
+        assert!((goodput.output_throughput_tok_s - 4.0 / 0.2).abs() < 1e-6);
+        assert!((goodput.request_throughput_rps - 2.0 / 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sla_validation_accepts_independent_token_bounds() {
+        for sla in [
+            SlaThresholds {
+                ttft_ms: Some(150.0),
+                ..Default::default()
+            },
+            SlaThresholds {
+                itl_ms: Some(30.0),
+                ..Default::default()
+            },
+        ] {
+            sla.validate().unwrap();
+        }
+    }
+
+    /// A TTFT-only SLA leaves ITL unbounded for request-level goodput.
+    #[test]
+    fn goodput_ttft_only_ignores_itl() {
+        let mut collector = TraceCollector::default();
+        collector.set_sla_thresholds(SlaThresholds {
+            ttft_ms: Some(150.0),
+            ..Default::default()
+        });
+        // TTFT=100 passes even though avg ITL=(400-100)/2=150ms.
+        add_completed(&mut collector, 1, 0.0, 3, &[100.0, 250.0, 400.0]);
+        // TTFT=200 fails independently of its short ITL.
+        add_completed(&mut collector, 2, 0.0, 3, &[200.0, 210.0, 220.0]);
+
+        assert_eq!(collector.finish().goodput.unwrap().completed_requests, 1);
+    }
+
+    /// A request straddling the ITL bound flips good↔bad at the boundary.
+    #[test]
+    fn goodput_itl_boundary_is_inclusive() {
+        let sla = SlaThresholds {
+            ttft_ms: None,
+            itl_ms: Some(50.0),
+            e2e_ms: None,
+        };
+        // avg_itl = (200−100)/(3−1) = 50.0, exactly the bound → good (≤).
+        let mut at_bound = TraceCollector::default();
+        at_bound.set_sla_thresholds(sla);
+        add_completed(&mut at_bound, 1, 0.0, 3, &[100.0, 150.0, 200.0]);
+        assert_eq!(at_bound.finish().goodput.unwrap().completed_requests, 1);
+        // avg_itl = (201−100)/2 = 50.5 > 50 → bad.
+        let mut over = TraceCollector::default();
+        over.set_sla_thresholds(sla);
+        add_completed(&mut over, 1, 0.0, 3, &[100.0, 150.0, 201.0]);
+        assert_eq!(over.finish().goodput.unwrap().completed_requests, 0);
+    }
+
+    /// An e2e-only SLA gates on end-to-end latency alone.
+    #[test]
+    fn goodput_e2e_only_sla() {
+        let mut collector = TraceCollector::default();
+        collector.set_sla_thresholds(SlaThresholds {
+            ttft_ms: None,
+            itl_ms: None,
+            e2e_ms: Some(150.0),
+        });
+        add_completed(&mut collector, 1, 0.0, 2, &[100.0, 200.0]); // e2e=200 > 150 → BAD
+        add_completed(&mut collector, 2, 0.0, 2, &[60.0, 120.0]); // e2e=120 ≤ 150 → GOOD
+        assert_eq!(collector.finish().goodput.unwrap().completed_requests, 1);
+    }
+
+    /// No SLA → goodput is omitted entirely.
+    #[test]
+    fn goodput_absent_without_sla() {
+        let mut collector = TraceCollector::default();
+        add_completed(&mut collector, 1, 0.0, 2, &[10.0, 20.0]);
+        assert!(collector.finish().goodput.is_none());
+    }
+
+    /// Worker-seconds: the accumulator (agg/disagg) sums runtime contributions;
+    /// an externally clocked static runtime reports `count × duration_s`.
+    #[test]
+    fn worker_seconds_accumulated_and_static() {
+        let mut accumulated = TraceCollector::default();
+        add_completed(&mut accumulated, 1, 0.0, 2, &[10.0, 20.0]);
+        accumulated.add_worker_seconds(1.5, 4.0);
+        accumulated.add_worker_seconds(0.5, 1.0);
+        let report = accumulated.finish();
+        assert!((report.throughput.prefill_worker_seconds - 2.0).abs() < 1e-9);
+        assert!((report.throughput.decode_worker_seconds - 5.0).abs() < 1e-9);
+
+        let mut static_runtime = TraceCollector::default();
+        static_runtime.set_static_worker_count(0, 1);
+        add_completed(&mut static_runtime, 1, 0.0, 2, &[100.0, 200.0]); // duration = 0.2s
+        let report = static_runtime.finish();
+        assert!(report.throughput.prefill_worker_seconds.abs() < 1e-9);
+        assert!((report.throughput.decode_worker_seconds - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compact_summary_excludes_execution_evidence() {
+        let mut collector = TraceCollector::default();
+        add_completed(&mut collector, 1, 0.0, 2, &[10.0, 20.0]);
+        let mut report = collector.finish();
+        report.runtime_evidence.pressure = Some(crate::replay::PressureEvidence::default());
+
+        let summary = serde_json::to_value(&report).unwrap();
+        assert!(summary.get("runtime_evidence").is_none());
+    }
+
+    /// gpu_hours derives from worker-seconds x the per-role GPUs/worker that the
+    /// runtime records from the mocker's own parallelism.
+    #[test]
+    fn gpu_hours_from_worker_seconds_and_gpus_per_worker() {
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(2, 4); // prefill 2 GPUs/worker, decode 4
+        add_completed(&mut collector, 1, 0.0, 2, &[100.0, 200.0]);
+        collector.add_worker_seconds(10.0, 5.0); // prefill_ws=10, decode_ws=5
+        let report = collector.finish();
+        assert_eq!(report.throughput.prefill_gpus_per_worker, 2);
+        assert_eq!(report.throughput.decode_gpus_per_worker, 4);
+        // gpu_hours = (10*2 + 5*4) / 3600 = 40 / 3600
+        assert!((report.throughput.gpu_hours - 40.0 / 3600.0).abs() < 1e-9);
+    }
+
+    /// Records emerge in arrival-time order, so the JSONL file produced from
+    /// them is deterministic across runs (important for diff-friendly CI).
+    #[test]
+    fn per_request_records_are_sorted_by_arrival_time() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        // Insert out of order on purpose.
+        for (uuid_n, arrival) in [(3u128, 30.0), (1, 0.0), (2, 10.0)] {
+            let uuid = Uuid::from_u128(uuid_n);
+            collector.on_arrival(uuid, arrival, 100, 1);
+            collector.on_admit(uuid, arrival + 1.0, 0);
+            collector.on_decode_assigned(uuid, 0);
+            collector.on_token(uuid, arrival + 5.0);
+            collector.on_terminal(uuid, arrival + 5.0, ReplayTerminalStatus::Completed);
+        }
+        let report = collector.finish();
+        let arrivals: Vec<f64> = report
+            .per_request
+            .iter()
+            .map(|r| r.arrival_time_ms)
+            .collect();
+        assert_eq!(arrivals, vec![0.0, 10.0, 30.0]);
+    }
+
+    #[test]
+    fn per_request_records_have_total_order_with_mixed_authored_ids() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        for (uuid_n, arrival, request_id) in [
+            (1_u128, 30.0, Some("request-b")),
+            (2, 20.0, None),
+            (3, 10.0, Some("request-a")),
+            (4, 0.0, None),
+        ] {
+            let uuid = Uuid::from_u128(uuid_n);
+            collector.on_arrival(uuid, arrival, 100, 1);
+            if let Some(request_id) = request_id {
+                collector.on_agentic_metadata(
+                    uuid,
+                    request_id.to_string(),
+                    "play".to_string(),
+                    arrival,
+                );
+            }
+            collector.on_admit(uuid, arrival + 1.0, 0);
+            collector.on_decode_assigned(uuid, 0);
+            collector.on_token(uuid, arrival + 5.0);
+            collector.on_terminal(uuid, arrival + 5.0, ReplayTerminalStatus::Completed);
+        }
+
+        let report = collector.finish();
+        assert_eq!(
+            report
+                .per_request
+                .iter()
+                .map(|record| (record.request_id.as_deref(), record.arrival_time_ms))
+                .collect::<Vec<_>>(),
+            vec![
+                (None, 0.0),
+                (None, 20.0),
+                (Some("request-a"), 10.0),
+                (Some("request-b"), 30.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn agentic_summary_is_independent_of_runtime_uuid_and_insertion_order() {
+        fn report(requests: [(&str, u128, f64); 3]) -> ReplayReport {
+            let mut collector = TraceCollector::default();
+            collector.set_capture_per_request(true);
+            collector.set_defer_token_timeline_finalization(true);
+            for (request_id, uuid, ttft_ms) in requests {
+                let uuid = Uuid::from_u128(uuid);
+                collector.on_arrival(uuid, 0.0, 100, 1);
+                collector.on_agentic_metadata(
+                    uuid,
+                    request_id.to_string(),
+                    "play".to_string(),
+                    0.0,
+                );
+                collector.on_admit(uuid, 0.0, 0);
+                collector.on_decode_assigned(uuid, 0);
+                collector.on_token(uuid, ttft_ms);
+                collector.on_terminal(uuid, ttft_ms, ReplayTerminalStatus::Completed);
+            }
+            collector.finish()
+        }
+
+        let left = report([
+            ("request-a", 3, 1.0e16),
+            ("request-b", 1, 1.0),
+            ("request-c", 2, 1.0),
+        ]);
+        let right = report([
+            ("request-c", 300, 1.0),
+            ("request-a", 100, 1.0e16),
+            ("request-b", 200, 1.0),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(&left).unwrap(),
+            serde_json::to_value(&right).unwrap()
+        );
+        for report in [&left, &right] {
+            assert_eq!(
+                report
+                    .per_request
+                    .iter()
+                    .map(|record| record.request_id.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                vec!["request-a", "request-b", "request-c"]
+            );
+        }
+    }
+
+    /// Each record must round-trip cleanly to JSON. Guards against accidental
+    /// serde regressions (e.g., adding a non-serializable field to
+    /// `PerRequestRecord`).
+    #[test]
+    fn per_request_record_serializes_to_json_object() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        let uuid = Uuid::from_u128(123);
+        collector.on_arrival(uuid, 0.0, 50, 2);
+        collector.on_admit(uuid, 1.0, 10);
+        collector.on_prefill_assigned(uuid, 0);
+        collector.on_decode_assigned(uuid, 1);
+        collector.on_token(uuid, 20.0);
+        collector.on_token(uuid, 25.0);
+        collector.on_terminal(uuid, 25.0, ReplayTerminalStatus::Completed);
+
+        let report = collector.finish();
+        let line = serde_json::to_string(&report.per_request[0])
+            .expect("PerRequestRecord must serialize cleanly");
+        // Parse it back and spot-check a few keys to confirm shape.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("emitted JSON must parse");
+        assert!(parsed.is_object());
+        assert_eq!(parsed["uuid"], uuid.to_string());
+        assert_eq!(parsed["input_length"], 50);
+        assert_eq!(parsed["output_length"], 2);
+        assert_eq!(parsed["prefill_worker_idx"], 0);
+        assert_eq!(parsed["decode_worker_idx"], 1);
+        assert!(parsed["itl_ms"].is_number());
+        assert_eq!(parsed["terminal_status"], "completed");
+    }
+
+    #[test]
+    fn terminal_failures_emit_nullable_latencies_and_unfinished_requests_are_omitted() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        for (uuid_n, status) in [
+            (1, ReplayTerminalStatus::Rejected),
+            (2, ReplayTerminalStatus::Canceled),
+            (3, ReplayTerminalStatus::Failed),
+        ] {
+            let uuid = Uuid::from_u128(uuid_n);
+            collector.on_arrival(uuid, uuid_n as f64, 64, 2);
+            collector.on_terminal(uuid, uuid_n as f64 + 1.0, status);
+        }
+        collector.on_arrival(Uuid::from_u128(4), 4.0, 64, 2);
+
+        let report = collector.finish();
+
+        assert_eq!(report.per_request.len(), 3);
+        assert_eq!(
+            report
+                .per_request
+                .iter()
+                .map(|record| record.terminal_status)
+                .collect::<Vec<_>>(),
+            vec![
+                ReplayTerminalStatus::Rejected,
+                ReplayTerminalStatus::Canceled,
+                ReplayTerminalStatus::Failed,
+            ]
+        );
+        assert!(report.per_request.iter().all(|record| {
+            record.first_admit_ms.is_none()
+                && record.first_token_ms.is_none()
+                && record.last_token_ms.is_none()
+                && record.ttft_ms.is_none()
+                && record.e2e_latency_ms.is_none()
+        }));
+    }
+
+    #[test]
+    fn first_admission_reuse_ignores_later_readmission_self_reuse() {
+        let uuid = Uuid::from_u128(1);
+        let mut collector = TraceCollector::default();
+        collector.on_arrival(uuid, 0.0, 100, 1);
+        collector.on_admit(uuid, 1.0, 0);
+        collector.on_admit(uuid, 2.0, 80);
+        collector.on_token(uuid, 3.0);
+        collector.on_terminal(uuid, 3.0, ReplayTerminalStatus::Completed);
+
+        let report = collector.finish();
+
+        assert_eq!(report.prefix_cache_reused_ratio, 0.8);
+        assert_eq!(report.first_admission_prefix_cache_reused_ratio, 0.0);
+    }
+
+    #[test]
+    fn terminal_request_releases_per_token_timestamps() {
+        let uuid = Uuid::from_u128(7);
+        let mut collector = TraceCollector::default();
+        collector.on_arrival(uuid, 0.0, 128, 100_000);
+        collector.on_admit(uuid, 1.0, 0);
+        for token_index in 0..100_000 {
+            collector.on_token(uuid, token_index as f64 + 10.0);
+        }
+        assert_eq!(collector.retained_token_timestamps(), 100_000);
+
+        collector.on_terminal(uuid, 100_009.0, ReplayTerminalStatus::Completed);
+
+        assert_eq!(collector.retained_token_timestamps(), 0);
+        let snapshot = collector
+            .snapshot(uuid)
+            .expect("request must remain summarized");
+        assert_eq!(snapshot.output_length, 100_000);
+        assert_eq!(snapshot.first_token_ms, Some(10.0));
+        assert_eq!(snapshot.last_token_ms, Some(100_009.0));
+        let report = collector.finish();
+        assert_eq!(report.latency.itl.distribution.mean_ms, 1.0);
+        assert_eq!(report.latency.itl.distribution.min_ms, 1.0);
+        assert_eq!(report.latency.itl.distribution.max_ms, 1.0);
+    }
+
+    #[test]
+    fn deferred_token_timeline_finalization_folds_at_finish() {
+        let uuid = Uuid::from_u128(8);
+        let mut collector = TraceCollector::default();
+        collector.set_defer_token_timeline_finalization(true);
+        collector.on_arrival(uuid, 0.0, 128, 3);
+        collector.on_admit(uuid, 1.0, 0);
+        collector.on_token(uuid, 10.0);
+        collector.on_token(uuid, 12.0);
+        collector.on_token(uuid, 15.0);
+        collector.on_terminal(uuid, 15.0, ReplayTerminalStatus::Completed);
+
+        assert_eq!(collector.retained_token_timestamps(), 3);
+
+        let report = collector.finish();
+        assert_eq!(report.latency.itl.distribution.mean_ms, 2.5);
+        assert_eq!(report.latency.itl.distribution.min_ms, 2.0);
+        assert_eq!(report.latency.itl.distribution.max_ms, 3.0);
+    }
+}

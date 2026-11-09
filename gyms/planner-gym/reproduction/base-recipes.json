@@ -1,0 +1,79 @@
+{
+  "art-chat": {
+    "converter": "scripts/frozen_converters/a38845bb8ae40c93178a37b45ee57cce21654ef76c55cdd0b0b317f736dcadc9.py",
+    "converter_sha256": "a38845bb8ae40c93178a37b45ee57cce21654ef76c55cdd0b0b317f736dcadc9",
+    "expected_base_sha256": "eaf26c6e31fd7f895339b7099eeffd54787015791fb24f7d00c4a8ebdc2878ca",
+    "expected_requests": 409310,
+    "expected_bytes": 297959160
+  },
+  "azure-2024-code": {
+    "converter": "scripts/frozen_converters/da3a861cdd74aba64aaef25c53db48f5baf8d590fdf22091cc5e081e56d00788.py",
+    "converter_sha256": "da3a861cdd74aba64aaef25c53db48f5baf8d590fdf22091cc5e081e56d00788",
+    "expected_base_sha256": "1f1237c12a791358bc1e123de4b296d941dc2e8f4e63bb367438130e579e1ccc",
+    "expected_requests": 3210786,
+    "expected_bytes": 1620765027
+  },
+  "azure-2024-conv": {
+    "converter": "scripts/frozen_converters/da3a861cdd74aba64aaef25c53db48f5baf8d590fdf22091cc5e081e56d00788.py",
+    "converter_sha256": "da3a861cdd74aba64aaef25c53db48f5baf8d590fdf22091cc5e081e56d00788",
+    "expected_base_sha256": "b8cb1530d3a1b11f0877a6347a7b5bebe0063217a46a69911cb9e3de796a2401",
+    "expected_requests": 4449089,
+    "expected_bytes": 1647238285
+  },
+  "burstgpt-3": {
+    "converter": "scripts/frozen_converters/a38845bb8ae40c93178a37b45ee57cce21654ef76c55cdd0b0b317f736dcadc9.py",
+    "converter_sha256": "a38845bb8ae40c93178a37b45ee57cce21654ef76c55cdd0b0b317f736dcadc9",
+    "expected_base_sha256": "f7e61ca09a834ca5bae1a49c8b6aced6d341d66ccdd91d76e30aaa464fddad70",
+    "expected_requests": 391084,
+    "expected_bytes": 71457234
+  },
+  "mooncake-conversation": {
+    "converter": "scripts/frozen_converters/030b91f1c37fac8721c94580286f53c62fc1b7addff7bb35e8992515965599c5.py",
+    "converter_sha256": "030b91f1c37fac8721c94580286f53c62fc1b7addff7bb35e8992515965599c5",
+    "expected_base_sha256": "b2a49cb6ccfce386832c2320b1821ca62543af38eb9d5b1988ee003b69479a5f",
+    "expected_requests": 12031,
+    "expected_bytes": 3428642
+  },
+  "mooncake-synthetic": {
+    "converter": "scripts/frozen_converters/030b91f1c37fac8721c94580286f53c62fc1b7addff7bb35e8992515965599c5.py",
+    "converter_sha256": "030b91f1c37fac8721c94580286f53c62fc1b7addff7bb35e8992515965599c5",
+    "expected_base_sha256": "411df637e17f2ba0eb1bd6a45b91120bad4cb6f8a2eaee68ba741a2183f778db",
+    "expected_requests": 3993,
+    "expected_bytes": 1227838
+  },
+  "mooncake-toolagent": {
+    "converter": "scripts/frozen_converters/030b91f1c37fac8721c94580286f53c62fc1b7addff7bb35e8992515965599c5.py",
+    "converter_sha256": "030b91f1c37fac8721c94580286f53c62fc1b7addff7bb35e8992515965599c5",
+    "expected_base_sha256": "48b627ceec0162534a8e4558f940f0942c9504fba74c9bd634e72977d755a446",
+    "expected_requests": 23608,
+    "expected_bytes": 5306069
+  },
+  "qwen-coder": {
+    "converter": "scripts/frozen_converters/a38845bb8ae40c93178a37b45ee57cce21654ef76c55cdd0b0b317f736dcadc9.py",
+    "converter_sha256": "a38845bb8ae40c93178a37b45ee57cce21654ef76c55cdd0b0b317f736dcadc9",
+    "expected_base_sha256": "5a6001dd18d74db64cf8a1461620af5bcb1d34e3a848b487b7ef749293fec08a",
+    "expected_requests": 43011,
+    "expected_bytes": 118501958
+  },
+  "qwen-thinking": {
+    "converter": "scripts/frozen_converters/a38845bb8ae40c93178a37b45ee57cce21654ef76c55cdd0b0b317f736dcadc9.py",
+    "converter_sha256": "a38845bb8ae40c93178a37b45ee57cce21654ef76c55cdd0b0b317f736dcadc9",
+    "expected_base_sha256": "3e7e5753981f1be0e4942b23c7a417492554680d082ba2d93403808e8de83d17",
+    "expected_requests": 10812,
+    "expected_bytes": 25142942
+  },
+  "qwen-toc": {
+    "converter": "scripts/frozen_converters/a38845bb8ae40c93178a37b45ee57cce21654ef76c55cdd0b0b317f736dcadc9.py",
+    "converter_sha256": "a38845bb8ae40c93178a37b45ee57cce21654ef76c55cdd0b0b317f736dcadc9",
+    "expected_base_sha256": "7529d4e558fbd76bcefe13575cea6364a3b5b7cb38626bb055f413494c7877c5",
+    "expected_requests": 43058,
+    "expected_bytes": 51919647
+  },
+  "ragpulse": {
+    "converter": "scripts/frozen_converters/030b91f1c37fac8721c94580286f53c62fc1b7addff7bb35e8992515965599c5.py",
+    "converter_sha256": "030b91f1c37fac8721c94580286f53c62fc1b7addff7bb35e8992515965599c5",
+    "expected_base_sha256": "c17175868f414716fc1d796a03f7359d4c0fb1debf014f58d53aab59eb9a7fba",
+    "expected_requests": 1050,
+    "expected_bytes": 522343
+  }
+}

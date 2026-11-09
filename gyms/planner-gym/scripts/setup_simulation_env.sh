@@ -140,5 +140,7 @@ if options.jsonl_path != "telemetry.jsonl":
     raise SystemExit("Dynamo's TelemetryOptions did not retain jsonl_path")
 PY
 
+python "$gym_dir/scripts/install_queue_runtime.py" --check
+
 echo "Planner Gym simulation environment ready"
 printf 'Activate it with: source %q\n' "$venv_dir/bin/activate"

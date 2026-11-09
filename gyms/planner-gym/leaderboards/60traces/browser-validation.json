@@ -1,0 +1,26 @@
+{
+  "checked_at": "2026-11-09T16:02:52.105Z",
+  "checks": [
+    {
+      "page": "index.html",
+      "status": "passed"
+    },
+    {
+      "page": "aggregated.html",
+      "status": "passed"
+    },
+    {
+      "page": "disaggregated.html",
+      "status": "passed"
+    },
+    {
+      "page": "latency.html",
+      "status": "passed"
+    },
+    {
+      "page": "slo-rankings.html",
+      "status": "passed"
+    }
+  ],
+  "exceptions": []
+}

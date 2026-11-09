@@ -1,0 +1,491 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Commands and effects exchanged with one scheduler rank.
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::{HandoffId, HandoffTransferTiming};
+
+/// Encoder work behind one image, as the checkpoint's processor lays it out.
+///
+/// An image becomes `sequences` independent encoder sequences (tiles, or one
+/// for a dynamic-resolution tower) that attention never crosses; the token
+/// counts are per sequence. The placeholder span an image occupies in the
+/// prompt can exceed `sequences * output_tokens` by structural tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EncoderShape {
+    pub sequences: u32,
+    /// Patch-embedding tokens per sequence.
+    pub patch_tokens: u32,
+    /// Transformer tokens per sequence (patches plus any CLS token).
+    pub transformer_tokens: u32,
+    /// Merged output tokens per sequence.
+    pub output_tokens: u32,
+}
+
+/// One image placeholder span and the encoder shape behind it.
+///
+/// `token_start..token_end` is the half-open placeholder interval inside the
+/// prompt; its length is the image's visual token count. `identity` keys the
+/// vision embedding cache and repeats only when the workload reuses an image.
+/// `embedding_bytes` is the encoder output retained by the embedding cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageSpec {
+    pub identity: u64,
+    pub token_start: usize,
+    pub token_end: usize,
+    pub encoder: EncoderShape,
+    pub embedding_bytes: u64,
+}
+
+impl ImageSpec {
+    /// Placeholder tokens occupied by this image.
+    pub fn visual_tokens(&self) -> usize {
+        self.token_end - self.token_start
+    }
+
+    /// Whether the placeholder interval intersects the half-open `start..end`.
+    pub fn overlaps(&self, start: usize, end: usize) -> bool {
+        self.token_start < end && start < self.token_end
+    }
+}
+
+/// Rank named by a router's `kv.fetch` hint as the holder of a prompt prefix.
+///
+/// It stands in for the hint's `source_control_endpoint`, which identifies one
+/// worker and attention-DP rank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct KvHintSource {
+    /// Logical worker owning the source rank.
+    pub worker_id: u64,
+    /// Attention-DP rank within that worker.
+    pub dp_rank: u32,
+}
+
+/// Runtime-neutral request accepted by the rank engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Request {
+    /// Stable request identity allocated by the caller.
+    pub request_id: Uuid,
+    /// Prompt token IDs.
+    pub tokens: Vec<u32>,
+    /// Requested output length.
+    pub max_output_tokens: usize,
+    /// Optional exact output IDs. Its length overrides `max_output_tokens`.
+    /// When absent, each output token is derived from `request_id` and its
+    /// output position, so reusing a request ID reproduces the same stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<u32>>,
+    /// Optional session attribution; does not affect scheduling or cache identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Image placeholders inside `tokens`, in prompt order; empty for text-only requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageSpec>,
+    /// Optional router hint naming another rank that may hold a prefix of
+    /// `tokens`. Never the receiving rank itself. Engines without KVCR ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_hint: Option<KvHintSource>,
+}
+
+/// Commands supported by the standalone scheduler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Submit one request.
+    Submit(Request),
+    /// Submit a request whose completed prefill KV must remain source-held.
+    SubmitHandoffPrefill {
+        handoff_id: HandoffId,
+        request: Request,
+    },
+    /// Accept a decode request and reserve its destination KV footprint.
+    ReserveDestination {
+        handoff_id: HandoffId,
+        request: Request,
+    },
+    /// Make a reserved destination runnable after transfer completion.
+    ActivateDestination { handoff_id: HandoffId },
+    /// Release a successfully transferred source hold.
+    ReleaseSource { handoff_id: HandoffId },
+    /// Cancel pending or held source ownership.
+    CancelSource { handoff_id: HandoffId },
+    /// Cancel pending, reserved, or active destination ownership.
+    CancelDestination { handoff_id: HandoffId },
+    /// Cancel one request.
+    ///
+    /// A command that removes scheduler-owned state also suppresses output
+    /// retained by an in-flight pass. `discard_pending_output` additionally
+    /// requests suppression when scheduler cancellation is a no-op, which is
+    /// needed after an external driver has already retired the request.
+    CancelRequest {
+        request_id: Uuid,
+        discard_pending_output: bool,
+    },
+}
+
+/// Result of applying a scheduler command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandResult {
+    /// A new request was accepted.
+    Submitted(Uuid),
+    /// A destination request was accepted; physical reservation may be pending.
+    DestinationAccepted { request_id: Uuid },
+    /// State or retained effects were changed.
+    Applied,
+    /// The command addressed no owned state or retained effect.
+    Noop,
+}
+
+/// Asynchronous scheduler lifecycle fact consumed by the Replayer's handoff
+/// coordinator.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LifecycleEvent {
+    /// Prefill computation completed and source KV ownership is retained.
+    SourceHeld {
+        handoff_id: HandoffId,
+        request_id: Uuid,
+        transfer_timing: HandoffTransferTiming,
+    },
+    /// Decode-side physical KV capacity has been reserved.
+    DestinationReserved {
+        handoff_id: HandoffId,
+        request_id: Uuid,
+        transferable_prompt_tokens: usize,
+    },
+    /// A host-aware scheduler reached a scheduler-thread stage for one request.
+    TtftMilestone {
+        request_id: Uuid,
+        stage: TtftMilestone,
+        at_ms: f64,
+    },
+}
+
+/// Scheduler-thread stages reported by a host-aware scheduler for one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TtftMilestone {
+    /// Left the frontend worker pools; delivered to the scheduler process.
+    FrontendReady,
+    /// Drained from the scheduler inbox at an iteration start.
+    Received,
+    /// Selected into its first batch.
+    Selected,
+    /// The forward that finished its prompt completed on the device.
+    PrefillComplete,
+}
+
+/// One runtime-neutral KV block identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvBlock {
+    /// Sequence-aware block hash.
+    pub block_hash: u64,
+    /// Token-only local block hash.
+    pub tokens_hash: u64,
+    /// Token IDs retained only when explicitly configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_ids: Option<Vec<u32>>,
+}
+
+/// A consecutive set of newly visible blocks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBlocks {
+    /// Parent sequence hash immediately preceding the batch.
+    pub parent_hash: Option<u64>,
+    /// Optional absolute zero-based position of the first block.
+    ///
+    /// `None` preserves the parent-linked device stream emitted by the native
+    /// schedulers; adapters must not invent an absolute position because that
+    /// changes how downstream radix indexes reconcile stores and removals.
+    /// `HostPinned` events carry the prompt block index, because shared-pool
+    /// residency can land a child before its parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_position: Option<usize>,
+    /// Blocks in sequence order.
+    pub blocks: Vec<KvBlock>,
+    /// Session of the request making these blocks visible, not exclusive ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// Runtime-neutral KV event payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvEventData {
+    /// Blocks became prefix-cache visible.
+    Stored(StoredBlocks),
+    /// The final physical copy of these hashes was evicted.
+    Removed { block_hashes: Vec<u64> },
+}
+
+/// Cache tier whose residency a [`KvEvent`] describes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvEventTier {
+    /// Device (G1) KV cache. Omitted from serialized events.
+    #[default]
+    Device,
+    /// The native G2 host cache reachable by the publishing rank: its private
+    /// `dp_rank_local` cache or a `cluster_shared` pool.
+    HostPinned,
+}
+
+impl KvEventTier {
+    fn is_device(&self) -> bool {
+        *self == Self::Device
+    }
+}
+
+/// Ordered runtime-neutral KV event emitted by one rank.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvEvent {
+    /// Monotonic rank-local event sequence.
+    pub event_id: u64,
+    /// Attention-DP rank.
+    pub dp_rank: u32,
+    /// Event payload.
+    pub data: KvEventData,
+    /// Residency tier; absent means [`KvEventTier::Device`].
+    #[serde(default, skip_serializing_if = "KvEventTier::is_device")]
+    pub tier: KvEventTier,
+}
+
+/// First-admission provenance for prompt tokens reused across cache tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CacheTierAttribution {
+    /// Reused prompt tokens already resident in device KV before any H2D.
+    pub g1_reused_input_tokens: usize,
+    /// Additional reused prompt tokens restored from the native host tier.
+    pub host_reused_input_tokens: usize,
+}
+
+/// Request admission exposed at pass start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Admission {
+    /// Admitted request.
+    pub request_id: Uuid,
+    /// Prompt tokens reused from all KV-cache tiers.
+    pub reused_input_tokens: usize,
+    /// Tier provenance captured before a host-loaded prefix becomes G1.
+    pub cache_tier_attribution: Option<CacheTierAttribution>,
+}
+
+/// Scheduler action taken to relieve KV pressure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PressureKind {
+    /// vLLM evicted a running request and returned it to the waiting queue.
+    VllmPreemption,
+    /// SGLang retracted a running decode request for later readmission.
+    SglangRetraction,
+}
+
+/// Runtime-neutral scheduler and KV occupancy around one pressure action.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PressureState {
+    /// Requests runnable before or after the action.
+    pub running_requests: usize,
+    /// Requests waiting for admission, when the scheduler exposes that count.
+    pub waiting_requests: Option<usize>,
+    /// Physically active native-G1 blocks.
+    pub active_blocks: usize,
+}
+
+/// One scheduler-owned KV pressure action emitted with pass-start effects.
+///
+/// The Replayer may attach topology/pool identity and correlate a later
+/// [`Admission`] for the same request. The engine always produces this
+/// lightweight fact; capture policy belongs to the consuming runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PressureEvent {
+    /// Modeled timestamp at which the scheduler took the action.
+    pub at_ms: f64,
+    /// Scheduler-specific pressure action.
+    pub kind: PressureKind,
+    /// Request removed from the running set.
+    pub request_id: Uuid,
+    /// Scheduler/KV state immediately before the action.
+    pub state_before: PressureState,
+    /// Scheduler/KV state immediately after the action.
+    pub state_after: PressureState,
+    /// Blocks owned by this request before it was preempted or retracted.
+    pub request_active_blocks_before: usize,
+    /// Logically available blocks used by the SGLang retraction decision.
+    pub logical_available_blocks_before: Option<usize>,
+    /// Blocks required by the SGLang retraction decision.
+    pub required_blocks_before: Option<usize>,
+}
+
+/// One client-visible output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Output {
+    /// Request producing the output.
+    pub request_id: Uuid,
+    /// Generated token, or `None` for a terminal-without-token signal.
+    pub token_id: Option<u32>,
+    /// Whether request ownership ended with this output.
+    pub completed: bool,
+    /// Whether admission rejected the request as physically impossible.
+    pub rejected: bool,
+    /// Prompt tokens served from KV cache at first admission, reported once
+    /// on the request's first output.
+    pub cached_tokens: Option<usize>,
+}
+
+/// Rank-local scheduler and G1 metrics.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Metrics {
+    pub dp_rank: u32,
+    /// Backend-native legacy occupied-block count. vLLM reports blocks
+    /// referenced by active requests; SGLang reports occupied page-pool blocks,
+    /// including evictable radix-resident pages.
+    pub active_blocks: u64,
+    /// Reusable resident blocks not included in `active_blocks`. This is
+    /// currently populated by vLLM; SGLang reports zero because its legacy
+    /// occupied count already includes radix-resident pages.
+    pub inactive_blocks: u64,
+    /// Zero for grouped caches: heterogeneous page sizes have no single
+    /// block capacity. Use `kv_cache_capacity_bytes` in that case.
+    pub total_blocks: u64,
+    /// Physical grouped-cache occupancy, including scheduled chunk storage.
+    pub kv_cache_used_bytes: Option<u64>,
+    /// Physical grouped-cache capacity; absent for the legacy linear pool.
+    pub kv_cache_capacity_bytes: Option<u64>,
+    /// Byte occupancy for grouped caches; otherwise `active_blocks / total_blocks`.
+    pub cache_usage: f64,
+    /// Physical resident fraction. This includes inactive reusable vLLM blocks
+    /// and equals `cache_usage` for SGLang's legacy occupied-page metric.
+    pub physical_cache_usage: f64,
+    pub running_requests: u64,
+    pub waiting_requests: u64,
+    pub preemptions_total: u64,
+    /// SGLang radix-cache tokens reused by the most recently completed pass.
+    ///
+    /// Backends without an equivalent pass-local metric report zero.
+    pub sglang_cache_hit_tokens: u64,
+    /// Total SGLang prefill tokens considered by the most recently completed
+    /// pass. Backends without an equivalent pass-local metric report zero.
+    pub sglang_cache_total_tokens: u64,
+}
+
+/// Per-pass scheduling statistics.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ForwardPassMetrics {
+    pub num_prefill_requests: u32,
+    pub sum_prefill_tokens: u64,
+    pub var_prefill_length: f64,
+    pub sum_prefill_kv_tokens: u64,
+    pub num_decode_requests: u32,
+    pub sum_decode_kv_tokens: u64,
+    pub var_decode_kv_tokens: f64,
+    pub num_queued_prefill: u32,
+    pub sum_queued_prefill_tokens: u64,
+    pub var_queued_prefill_length: f64,
+    pub num_queued_decode: u32,
+    pub sum_queued_decode_kv_tokens: u64,
+    pub var_queued_decode_kv_tokens: f64,
+    pub duration_ms: f64,
+}
+
+/// Effects of a scheduler command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandEffects {
+    pub result: CommandResult,
+    pub lifecycle_events: Vec<LifecycleEvent>,
+    pub kv_events: Vec<KvEvent>,
+    /// Requests whose scheduler/KV ownership ended while applying this command.
+    ///
+    /// Replayers use this authoritative delta for cancellation and handoff
+    /// cleanup instead of inferring ownership from command ordering.
+    pub retired_requests: Vec<Uuid>,
+    /// Scheduler state after the command and all immediately admitted work.
+    ///
+    /// Live drivers use this to acknowledge commands while the engine is idle
+    /// without waiting for an otherwise unrelated forward pass.
+    pub metrics: Metrics,
+    /// Whether an output already computed by an in-flight pass was suppressed.
+    pub suppressed_pending_output: bool,
+}
+
+/// Effects visible as soon as an engine pass starts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PassStartEffects {
+    /// Requests selected for this committed pass, including chunked prefill.
+    /// Queue ownership alone does not imply unfinished model work.
+    pub committed_requests: Vec<Uuid>,
+    pub admissions: Vec<Admission>,
+    pub pressure_events: Vec<PressureEvent>,
+    pub kv_events: Vec<KvEvent>,
+}
+
+/// Decode/verification work contributing to acceptance-length telemetry.
+///
+/// IMPORTANT: Never reconstruct these counters from merged visible outputs.
+/// Prefill's first token is not a decode sample, and stop/output limits can
+/// truncate a verified burst. Count accepted draft tokens plus the base token
+/// BEFORE that truncation, once per request that actually executes decode.
+/// Ordinary non-speculative decode contributes (1, 1) as a simulator baseline.
+///
+/// Upstream accounting references (independently implemented):
+/// - SGLang: https://github.com/sgl-project/sglang/blob/5c8bd8b51b53b9b39eb1edec582ee43b21002106/python/sglang/srt/managers/scheduler_metrics_mixin.py#L80-L82
+/// - vLLM: https://github.com/vllm-project/vllm/blob/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/v1/spec_decode/metrics.py#L113-L114
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecodeAcceptance {
+    pub accepted_tokens: usize,
+    pub forwards: usize,
+}
+
+/// Effects released at the modeled pass completion boundary.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PassCompletionEffects {
+    pub outputs: Vec<Output>,
+    pub lifecycle_events: Vec<LifecycleEvent>,
+    /// KV events whose scheduler visibility boundary is pass completion.
+    pub kv_events: Vec<KvEvent>,
+    pub metrics: Metrics,
+    pub forward_pass_metrics: ForwardPassMetrics,
+    pub decode_acceptance: DecodeAcceptance,
+}
+
+/// Retained completion effects of an eagerly executed engine pass.
+#[doc(hidden)]
+pub struct PendingPass {
+    pub(crate) started_at_ms: f64,
+    pub(crate) effects: PassCompletionEffects,
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn optional_session_metadata_is_json_compatible() {
+        let request_json = serde_json::json!({"request_id": Uuid::nil(), "tokens": [1, 2], "max_output_tokens": 1});
+        let mut request: Request = serde_json::from_value(request_json).unwrap();
+        assert!(request.session_id.is_none());
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("session_id")
+                .is_none()
+        );
+        request.session_id = Some("session".into());
+        assert_eq!(
+            serde_json::from_value::<Request>(serde_json::to_value(&request).unwrap()).unwrap(),
+            request
+        );
+        let legacy = serde_json::json!({"event_id": 1, "dp_rank": 0, "data": {"stored": {"parent_hash": null, "blocks": []}}});
+        let mut event: KvEvent = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&event).unwrap(), legacy);
+        let KvEventData::Stored(stored) = &mut event.data else {
+            panic!("expected store");
+        };
+        stored.session_id = Some("session".into());
+        assert_eq!(
+            serde_json::from_value::<KvEvent>(serde_json::to_value(&event).unwrap()).unwrap(),
+            event
+        );
+    }
+}

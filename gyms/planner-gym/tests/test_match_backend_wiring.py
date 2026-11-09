@@ -219,7 +219,7 @@ def _sim_config(
             "name": f"sim-{topology}-wiring",
             "backend": backend,
             "evaluations": {
-                "workloads": ["flat"],
+                "workloads": ["unit-a"],
                 "defaults": {
                     "seed": 11,
                     "max_requests": 4,
@@ -326,7 +326,7 @@ def _assert_common_sim_wiring(
     item = run.item
     assert run.materialize_calls == [
         {
-            "workload_name": "flat",
+            "workload_name": "unit-a",
             "seed": 11,
             "max_requests": 4,
             "arrival_speedup": 1.0,
@@ -966,7 +966,7 @@ def test_run_real_item_materializes_speedup_resolves_endpoint_and_projects_alias
                 ],
             },
             "evaluations": {
-                "workloads": ["flat"],
+                "workloads": ["unit-a"],
                 "defaults": {
                     "seed": 13,
                     "max_requests": 6,
@@ -1041,7 +1041,7 @@ def test_run_real_item_materializes_speedup_resolves_endpoint_and_projects_alias
 
     assert materialize_calls == [
         {
-            "workload_name": "flat",
+            "workload_name": "unit-a",
             "seed": 13,
             "max_requests": 6,
             "arrival_speedup": 5.0,
@@ -1067,7 +1067,7 @@ def test_run_real_item_materializes_speedup_resolves_endpoint_and_projects_alias
         "aiperf_bin": "custom-aiperf",
         "timeout_s": 45.0,
         "extra_args": ("--request-rate", "9"),
-        "workload_name": "flat",
+        "workload_name": "unit-a",
     }
     assert "arrival_speedup" not in aiperf_kwargs
 

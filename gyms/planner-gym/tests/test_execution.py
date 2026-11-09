@@ -43,7 +43,7 @@ def isolated_inputs(tmp_path: Path):
         run_id="0001-synthetic",
         backend="sim",
         autoscaler="fixed",
-        workload="flat",
+        workload="unit-a",
         sla="interactive",
         repetition=0,
         seed=7,
@@ -237,10 +237,11 @@ def test_parallel_builtin_trace_reader_survives_other_worker_write(
     tmp_path, monkeypatch
 ):
     config = load_match_config(
-        Path(__file__).resolve().parents[1] / "configs/match.controlled.example.yaml"
+        Path(__file__).resolve().parents[1]
+        / "tests/fixtures/match.controlled.example.yaml"
     )
     first = next(config.iter_runs())
-    second = replace(first, index=2, run_id="0002-sim-second-flat")
+    second = replace(first, index=2, run_id="0002-sim-second-unit-a")
     context = match_runner._ExecutionContext(
         "parallel-probe", tmp_path, tmp_path / "external"
     )
@@ -252,7 +253,7 @@ def test_parallel_builtin_trace_reader_survives_other_worker_write(
 
     def delayed_open(path, mode="r", *args, **kwargs):
         handle = original_open(path, mode, *args, **kwargs)
-        if mode == "w" and path.name == "flat.jsonl" and worker.index == 2:
+        if mode == "w" and path.name == "unit-a.jsonl" and worker.index == 2:
             second_opened.set()
             if not first_read.wait(timeout=5):
                 handle.close()
@@ -267,7 +268,7 @@ def test_parallel_builtin_trace_reader_survives_other_worker_write(
             raise RuntimeError("first worker did not write its trace")
         trace = match_runner._materialize_trace(
             run_context,
-            workload_name="flat",
+            workload_name="unit-a",
             seed=7,
             max_requests=16,
             arrival_speedup=1.0,

@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+name: D-LC-S04
+description: Static full-window baseline; prepare the verified input with scripts/prepare_60traces.py.
+labels:
+  dataset: burstgpt-3
+  regime: LC
+  deployment_size: small
+  input_preparation: frozen-original-scaler
+backend:
+  type: sim
+  topology: disagg
+  gpu_budget: 12
+  model:
+    name: deepseek-ai/DeepSeek-V4-Pro
+    ais_model_path: deepseek-ai/DeepSeek-V4-Pro
+  engines:
+    prefill:
+      system: b300_sxm
+      backend: vllm
+      backend_version: 0.24.0
+      ais_backend: vllm
+      ais_backend_version: 0.24.0
+      tp_size: 4
+      attention_dp_size: 1
+      moe_tp_size: 4
+      moe_ep_size: 1
+      runtime:
+        cold_start_delay_s: 0
+      extra_args:
+        max_num_seqs: 256
+        max_num_batched_tokens: 8192
+        enable_prefix_caching: true
+        enable_chunked_prefill: true
+        gpu_memory_utilization: 0.9
+    decode:
+      system: b300_sxm
+      backend: vllm
+      backend_version: 0.24.0
+      ais_backend: vllm
+      ais_backend_version: 0.24.0
+      tp_size: 8
+      attention_dp_size: 1
+      moe_tp_size: 8
+      moe_ep_size: 1
+      runtime:
+        cold_start_delay_s: 0
+      extra_args:
+        max_num_seqs: 256
+        max_num_batched_tokens: 8192
+        enable_prefix_caching: true
+        enable_chunked_prefill: true
+        gpu_memory_utilization: 0.9
+  router:
+    mode: round_robin
+  replay:
+    ais_bootstrap: false
+    request_capture: jsonl
+    telemetry_sample_interval_s: 5
+  autoscalers:
+  - name: static
+    type: static
+    config:
+      num_prefill: 1
+      num_decode: 1
+evaluations:
+  traces:
+  - name: input-d-lc-s04
+    format: dynamo
+    block_size: 64
+    paths:
+    - ../../data/60traces/reproduction/generated/D-LC-S04.jsonl
+  defaults:
+    seed: 20261007
+    arrival_speedup: 1.0
+    measurement_window:
+      start_s: 0.0
+      end_s: 604800.0
+slo_profiles:
+- name: LC-S
+  ttft_ms: 500
+  itl_ms: 15
+metrics:
+  rank_by: goodput_per_gpu
+  short_output_itl: skip
+execution:
+  max_parallel_runs: 1
+  timeout_s: 900
+  max_memory_mb: 24576
+  fail_fast: false
+publish:
+  artifact_root: ../../runs/60traces/D-LC-S04/artifacts
+  destinations:
+  - type: console
+  - type: json
+    path: ../../runs/60traces/D-LC-S04/results.json
+  - type: html
+    path: ../../runs/60traces/D-LC-S04/report.html

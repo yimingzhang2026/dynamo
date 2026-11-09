@@ -1,0 +1,426 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// Includes changes adapted from:
+// https://github.com/ai-dynamo/aiconfigurator/blob/6290c161a354da5250c391bd43372b2e9c6f4a51/aic-core/rust/aiconfigurator-core/src/config.rs
+
+//! Public wire/identity configuration types carried by an
+//! [`crate::perfmodel::engine::spec::EngineSpec`]. [`EngineConfig`] and its cohesive
+//! sub-structs ([`ParallelMapping`], [`QuantizationConfig`],
+//! [`SpeculativeConfig`]) mirror the flat JSON object emitted by Python's
+//! `compile_engine` (`sdk/engine.py`); [`BackendKind`] and [`DataType`] are
+//! the wire enums those structs reference. These are re-exported at the crate
+//! root, so `crate::EngineConfig`, `crate::BackendKind`, ... resolve unchanged.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// Validate an explicit FPM input before loading data or entering Python.
+pub(crate) fn validate_fpm_parquet_path(
+    path: Option<&Path>,
+    is_fpm: bool,
+) -> Result<Option<&str>, crate::AicError> {
+    let Some(path) = path else { return Ok(None) };
+    let path = path.to_str().ok_or_else(|| {
+        crate::AicError::InvalidEngineConfig("fpm_parquet_path must be valid UTF-8".into())
+    })?;
+    if path.is_empty() {
+        return Err(crate::AicError::InvalidEngineConfig(
+            "fpm_parquet_path cannot be empty".into(),
+        ));
+    }
+    if !is_fpm {
+        return Err(crate::AicError::InvalidEngineConfig(
+            "fpm_parquet_path requires forward_model='fpm' with exactly one FpmForward op per phase".into(),
+        ));
+    }
+    Ok(Some(path))
+}
+
+pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
+// bincode op payloads are positional, so a producer/consumer skew is only
+// distinguishable by this version — `EngineSpec::from_bincode` reads and
+// checks it before decoding the op lists. Bump whenever an `OpSpec` field
+// changes; keep in lockstep with `sdk/engine.py::ENGINE_SPEC_SCHEMA_VERSION`.
+// History:
+// - 2 (v0.10.0): op-payload layout change — the context-parallelism +
+//   perf-DB refactor added serialized fields such as `seq_split` /
+//   `cp_size` to `OpSpec`.
+// - 3 (PR #1405): MTP acceptance moved above aic-core —
+//   `nextn_accept_rates` removed from the spec payload.
+// - 4 (PR #1355): `Msa{Context,Generation}` variants inserted (bincode enum
+//   indices after `DsaGeneration` shifted). The MSA insertion and #1405
+//   each claimed version 3 on their own branch, so their merge needed a
+//   fresh number.
+// - 5 (PR #1460): MlaModuleOp gained `native_num_heads: Option<u32>`
+//   (#1458) — a bincode op-layout change.
+// - 6: `Kda` op variant appended (Kimi-K3). Claimed version 5 on its own
+//   branch concurrently with #1460, so the merge renumbered it (same
+//   precedent as the v3/v4 collision above).
+// - 7: `MoEDispatchOp` gained `attn_ar_modeled` — a bincode op-layout
+//   change (same class as v5).
+// - 8: `GemmOp` gained `below_grid_sol` — a bincode op-layout change (same
+//   class as v5).
+// - 9: `Op::FpmForward` whole-model variant added (forward_model="fpm").
+//   Claimed 5, 7 and 8 concurrently with other landings; renumbered at
+//   each merge (same precedent as the v3/v4 collision above).
+// - 10 (issue #1498): `MhcModuleOp` gained `seq_split` (CP per-rank token
+//   division) — a bincode op-layout change. Claimed 7 concurrently with
+//   `attn_ar_modeled`; renumbered at the rebase.
+// - 11 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
+//   `WideEpMoeDispatch`) were removed mid-enum, shifting every later
+//   bincode enum index; large-EP is now modeled natively by the
+//   `MoeAllToAll` / `MoeExpertCompute` variants appended after
+//   `FpmForward`, and `MoeExpertComputeOp` carries the `enable_eplb`
+//   legacy-fidelity field.
+// - 12 (PR-6): `DsaModuleOp` gained `attn_projection_quant_modes` — a
+//   bincode op-layout change (same class as v5/v7/v8/v10; the
+//   `#[serde(default)]` only covers the JSON wire, bincode is positional).
+// - 13 (deprecation-cleanup PR): the engine owns shared-layer source
+//   resolution. `EngineConfig` dropped the Python-resolved
+//   `perf_db_sources` map (a bincode config-layout change) and gained
+//   `enable_shared_layer` / `strict_provenance` policy flags; the engine
+//   re-derives every table's source list from the perf-data tree
+//   (`perf_database/source_resolution.rs`).
+// - 14 (PR #1533): `GdnOp` gained `mamba_ssm_dtype` — a positional bincode
+//   op-layout change (the serde default covers JSON only).
+// - 15 (AIC-1715/1716): `Context/GenerationAttentionOp` gained `lane_order`
+//   (appended at the struct tail; always serialized — bincode decodes
+//   positionally). Concurrently claimed v8, v9, v10, and v12 on its own
+//   branch (v8 alongside #1503's v7/v8, v9 alongside #1461's
+//   `Op::FpmForward` v9, v10 alongside issue #1498's Mhc `seq_split` v10,
+//   v12 alongside PR-6's `DsaModuleOp` `attn_projection_quant_modes` v12,
+//   and v14 alongside #1533's `GdnOp::mamba_ssm_dtype` v14); each landed
+//   first, so this renumbers to 15 at merge (same v3/v4, v5/v6 precedent).
+// - 16 (Muse Glimmer continuation): `GenerationAttentionOp` gained
+//   `use_qk_norm`, which is preserved across the Python/Rust boundary and
+//   contributes decode latency.
+// - 17 (Muse Glimmer review follow-up): `ContextAttentionOp` gained
+//   `apply_rope`, allowing global NoPE layers to omit the fused RoPE cost.
+// - 18 (AIC PR #1563 migration): GenerationAttentionOp gained speculative
+//   batch/query widths and FpmForwardOp gained verify_width. Upstream used
+//   14/15, already occupied here; these are positional bincode layout changes.
+//   TokenScale was appended to remap draft query widths before op lookup.
+// - 19 (DeepSeek-V4.1 review): Dsv41AttentionOp gained kv_cache_layout,
+//   separating physical backend KV payload from attention arithmetic precision.
+//   Its appended enum changes positional bincode layout; old JSON defaults only.
+// - 20 (DeepSeek-V4.1 FPM): FpmForwardOp gained original_fmha_quant_mode
+//   for selector diagnostics. This appends a positional field after the schema-19
+//   release; serde defaults support legacy JSON, not legacy bincode.
+// - 21 (AIC-1781): EngineConfig and MoeOp gained exact `moe_kernel_source`
+//   identity. Renumbered from the branch's concurrent v20 claim after the
+//   DeepSeek-V4.1 FPM layout landed first.
+// - 23 (DCP identity): ParallelMapping gained optional recorded dcp_size.
+//   JSON defaults preserve unrecorded DCP.
+// - 24 (typed FPM DCP): FpmForwardOp carries dcp_size separately from the
+//   base matching identity, so control flow never parses the string tuple.
+// - 25 (FPM decoupling): FpmForwardOp also carries the SOL/direct interpolation
+//   selector. The decoupling branch independently used 21 for this positional
+//   field; the combined layout differs from every prior schema, including 24.
+// - 26 (decode context parallelism): the context/generation attention, MLA,
+//   MLA-module, wide-EP MLA and DSA ops gained a tail-appended `dcp_size`
+//   (gathered query heads over a 1/dcp KV stripe; striped-context gather).
+// - 28 (GLM-5.3-Flash Ops): Glm53Attention, Glm53Ffn and Glm53Primitive gained
+//   a tail-appended `measured` generic composition priced in SILICON/HYBRID.
+//   The serde default covers JSON only; schema-27 bincode payloads are rejected.
+// - 29 (SGLang VL host loop): `EngineSpec` gained the optional `vision`
+//   section (encoder parallelism plus the tower's ops grouped by the token
+//   count they run on), appended to the bincode wire so a VL estimator can
+//   price encoder calls through the canonical model. Claimed 21, 27 and 28 on
+//   its own branch while 21 through 28 landed; renumbered at merge (precedent:
+//   15, 18, 26).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 29;
+
+/// Static engine identity and setup information carried by an
+/// [`crate::perfmodel::engine::spec::EngineSpec`].
+///
+/// Cohesive multi-field groupings (`parallel`, `quantization`,
+/// `speculative`) are extracted into sub-structs but `#[serde(flatten)]`-ed
+/// so the wire JSON stays flat. Python (`sdk/engine.py`) emits a flat object
+/// with keys like `tp_size`, `weight_dtype`, `nextn`, which deserialize into
+/// the regrouped struct unchanged.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EngineConfig {
+    pub schema_version: u32,
+
+    // Model
+    pub model_name: String,
+
+    // System
+    pub system_name: String,
+    /// Optional override for the bundled `systems/` directory. `None` (the
+    /// default) uses the resolution path baked into the build/env.
+    #[serde(default)]
+    pub systems_path: Option<PathBuf>,
+
+    // Backend
+    pub backend: BackendKind,
+    pub backend_version: Option<String>,
+
+    /// Forward-pass modeling mode (`"op_level"` | `"fpm"`); `None` keeps
+    /// Python's default (op_level). Threaded to `compile_engine` so the FPM
+    /// arena can select the whole-model engine through the supported
+    /// predictor API (additive-optional: absent in older payloads).
+    #[serde(default)]
+    pub forward_model: Option<String>,
+
+    /// Optional external FPM parquet used when `forward_model == "fpm"`.
+    /// The required metadata sidecar is resolved by replacing the parquet
+    /// extension with `.metadata.json`.
+    #[serde(default)]
+    pub fpm_parquet_path: Option<PathBuf>,
+
+    /// Use the backend-verified bounded DeepSeek-V4.1 decoder execution profile.
+    #[serde(default)]
+    pub decoder_replay: bool,
+    /// Exact collected MoE compute kernel-source lane.  Unlike
+    /// `moe_backend`, this selects one measured MoE table lane.
+    #[serde(default)]
+    pub moe_kernel_source: Option<String>,
+
+    // KV
+    pub kv_block_size: Option<u32>,
+
+    // Cohesive groupings (multi-field, semantically coupled).
+    #[serde(flatten)]
+    pub parallel: ParallelMapping,
+    #[serde(flatten)]
+    pub quantization: QuantizationConfig,
+    #[serde(flatten)]
+    pub speculative: Option<SpeculativeConfig>,
+
+    /// Shared-layer (sibling/cross-version) source inheritance on/off. The
+    /// engine resolves per-op sources ITSELF (`perf_database/source_resolution.rs`
+    /// — schema v13; the resolved `perf_db_sources` map left the wire with the
+    /// Python resolver). `None` derives the flag from `database_mode`
+    /// (SILICON/HYBRID = on), mirroring Python `_shared_layer_enabled`;
+    /// `Some` carries an explicit override (Python's `shared_layer=` kwarg,
+    /// used by regression harnesses to pin per-version behavior).
+    #[serde(default)]
+    pub enable_shared_layer: Option<bool>,
+
+    /// Fail-closed provenance mode (Python's `strict_provenance` /
+    /// `AIC_STRICT_PROVENANCE`): malformed sidecar metadata errors the load
+    /// instead of warn-and-continue. Absent on old specs -> false.
+    #[serde(default)]
+    pub strict_provenance: bool,
+
+    /// Perf-database lookup mode (Python's `database._default_database_mode`).
+    /// SILICON queries collected tables only; HYBRID falls back to the
+    /// util-space empirical layer on a typed silicon miss; EMPIRICAL always
+    /// answers `SOL/util`. Absent on old specs -> Silicon (back-compat).
+    #[serde(default)]
+    pub database_mode: crate::common::enums::DatabaseMode,
+
+    /// Directory-less `next` load (design §14). Set by the Python spec
+    /// builder ONLY after it resolved the requested version to the
+    /// fleet-advertised `next` slot and loaded it without a local version
+    /// directory (every op rides channel-1 backward fill). Tells the engine
+    /// reload to skip the missing-directory gate for THIS spec; raw-version
+    /// and provenance gates are untouched, and native builders never set it
+    /// (additive-optional: absent in older payloads -> false).
+    #[serde(default)]
+    pub tolerate_dirless_version: bool,
+
+    /// Enabled empirical transfer kinds as explicit tokens (`xshape` /
+    /// `xquant` / `xprofile` / `xop`). Python resolves preset names before
+    /// serialising, so no preset vocabulary exists on the wire. `None` =
+    /// the default ALL-transfers policy (mirrors `common.ALL_TRANSFERS`).
+    #[serde(default)]
+    pub transfer_policy: Option<Vec<String>>,
+
+    #[serde(default)]
+    pub extra: BTreeMap<String, String>,
+}
+
+/// Per-op-file ordered source list, keyed by op-file basename. See
+/// [`EngineConfig::perf_db_sources`].
+pub type PerfDbSources = BTreeMap<String, Vec<PerfSource>>;
+
+/// One perf-data source: an absolute file path plus an optional
+/// `kernel_source` allowlist. `None` admits every row (the primary source);
+/// `Some(set)` keeps only rows whose `kernel_source` is in the set (sibling
+/// inheritance). Wire form is a 2-element JSON array `[path, [ks...] | null]`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PerfSource(pub PathBuf, pub Option<Vec<String>>);
+
+impl PerfSource {
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+    pub fn kernel_sources(&self) -> Option<&[String]> {
+        self.1.as_deref()
+    }
+}
+
+/// Parallelism layout. Flattened into [`EngineConfig`] so the flat wire keys
+/// (`tp_size`, `pp_size`, ...) parse unchanged.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ParallelMapping {
+    pub tp_size: u32,
+    pub pp_size: u32,
+    #[serde(default)]
+    pub attention_dp_size: Option<u32>,
+    #[serde(default)]
+    pub moe_tp_size: Option<u32>,
+    #[serde(default)]
+    pub moe_ep_size: Option<u32>,
+    /// Context-parallel size. Part of the engine identity so cp variants get
+    /// distinct compiled handles. `None`/1 means no CP. The per-op CP math is
+    /// carried on the ops themselves (seq_split / cp_size / attn_cp_size), not
+    /// re-derived from this field.
+    #[serde(default)]
+    pub cp_size: Option<u32>,
+    /// Decode-context-parallel size (vLLM `-dcp` / SGLang `--dcp-size`): the
+    /// decode KV cache is striped by token position across ranks inside the
+    /// attention group. Part of the engine identity so dcp variants get
+    /// distinct compiled handles. `None`/1 means no DCP. Like `cp_size`, the
+    /// per-op math is carried on the ops themselves, not re-derived here.
+    /// Additive-optional: absent in older payloads.
+    #[serde(default)]
+    pub dcp_size: Option<u32>,
+}
+
+/// Precision/quantization dtypes. Flattened into [`EngineConfig`]. Field
+/// names and types are unchanged from the former flat struct so the flat
+/// wire keys (`weight_dtype`, `moe_dtype`, ...) parse unchanged.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct QuantizationConfig {
+    pub weight_dtype: Option<DataType>,
+    #[serde(default)]
+    pub moe_dtype: Option<DataType>,
+    pub activation_dtype: Option<DataType>,
+    /// FPM cell selector only; does not override model arithmetic or memory.
+    #[serde(default)]
+    pub fpm_fmha_dtype: Option<DataType>,
+    pub kv_cache_dtype: Option<DataType>,
+}
+
+/// Multi-Token Prediction speculative-decoding parameters. Wrapped in
+/// `Option<>` on [`EngineConfig`] so models without MTP don't carry the
+/// noise, and `#[serde(flatten)]`-ed so the flat wire key (`nextn`) parses
+/// unchanged. Accepted-token progress is modeled above `aic-core`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SpeculativeConfig {
+    /// Multi-Token Prediction speculative decoding depth / draft length
+    /// (Python's `task_config.nextn`). `None`/0 disables MTP scaling. MTP is
+    /// never auto-enabled; the user opts in explicitly.
+    #[serde(default)]
+    pub nextn: Option<u32>,
+}
+
+/// Backend performance database family.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    Trtllm,
+    Sglang,
+    Vllm,
+}
+
+impl BackendKind {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Trtllm => "trtllm",
+            Self::Sglang => "sglang",
+            Self::Vllm => "vllm",
+        }
+    }
+}
+
+/// Precision/quantization dtypes carried on the engine-config wire.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DataType {
+    #[serde(rename = "bfloat16")]
+    Bfloat16,
+    #[serde(rename = "float16")]
+    Float16,
+    #[serde(rename = "fp8")]
+    Fp8,
+    #[serde(rename = "fp8_static")]
+    Fp8Static,
+    #[serde(rename = "fp8_block")]
+    Fp8Block,
+    #[serde(rename = "nvfp4")]
+    Nvfp4,
+    #[serde(rename = "int8")]
+    Int8,
+    #[serde(rename = "int4")]
+    Int4,
+    #[serde(rename = "w4afp8")]
+    W4afp8,
+    #[serde(rename = "w4a16_mxfp4")]
+    W4a16Mxfp4,
+    #[serde(rename = "w4a8_mxfp4_mxfp8")]
+    W4a8Mxfp4Mxfp8,
+    #[serde(rename = "w4a8_mxfp4_mxfp8_trtllm")]
+    W4a8Mxfp4Mxfp8Trtllm,
+    #[serde(rename = "w4a16_mxfp4_cutlass")]
+    W4a16Mxfp4Cutlass,
+    // Append-only wire extension: keep existing bincode discriminants stable.
+    #[serde(rename = "w4a16_nvfp4")]
+    W4a16Nvfp4,
+    #[serde(rename = "w4a16_mxfp4_humming")]
+    W4a16Mxfp4Humming,
+}
+
+#[cfg(test)]
+mod engine_config_wire_tests {
+    use super::*;
+
+    /// Python's `compile_engine` (`sdk/engine.py`) emits a flat JSON object.
+    /// The regrouped `EngineConfig` uses `#[serde(flatten)]` to keep that wire
+    /// contract. This guards that the flat shape - including explicit nulls and
+    /// the now-dropped `model_arch` key - still deserializes into the nested
+    /// struct.
+    #[test]
+    fn flat_python_payload_deserializes_into_regrouped_config() {
+        let json = r#"{
+            "schema_version": 1,
+            "model_name": "Qwen/Qwen3-32B",
+            "model_arch": "Qwen3ForCausalLM",
+            "system_name": "h200_sxm",
+            "backend": "trtllm",
+            "backend_version": "1.0.0",
+            "tp_size": 2,
+            "pp_size": 1,
+            "moe_tp_size": null,
+            "moe_ep_size": null,
+            "attention_dp_size": null,
+            "weight_dtype": "bfloat16",
+            "moe_dtype": null,
+            "activation_dtype": "bfloat16",
+            "kv_cache_dtype": "bfloat16",
+            "kv_block_size": null,
+            "nextn": null,
+            "extra": {}
+        }"#;
+
+        let config: EngineConfig = serde_json::from_str(json).expect("flat payload must parse");
+
+        // Parallelism regrouping.
+        assert_eq!(config.parallel.tp_size, 2);
+        assert_eq!(config.parallel.pp_size, 1);
+        assert_eq!(config.parallel.attention_dp_size, None);
+        assert_eq!(config.parallel.moe_tp_size, None);
+        assert_eq!(config.parallel.moe_ep_size, None);
+
+        // Quantization regrouping.
+        assert_eq!(config.quantization.weight_dtype, Some(DataType::Bfloat16));
+        assert_eq!(config.quantization.moe_dtype, None);
+
+        // Speculative: Python always emits the `nextn` key, so the flattened
+        // option is `Some` with inner `None` (MTP disabled), not `None`.
+        let nextn = config.speculative.as_ref().and_then(|s| s.nextn);
+        assert_eq!(nextn, None);
+
+        // `model_arch` was dropped; the stray key must be ignored, not rejected.
+        assert!(!config.extra.contains_key("model_arch"));
+        assert_eq!(config.model_name, "Qwen/Qwen3-32B");
+
+        // `systems_path` is new and defaults to None when absent.
+        assert_eq!(config.systems_path, None);
+    }
+}

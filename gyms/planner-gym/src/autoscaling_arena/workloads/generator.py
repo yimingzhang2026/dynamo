@@ -129,7 +129,7 @@ class Workload:
     shape: Optional[ShapeFn] = None
     prefix_factory: Optional[PrefixFactory] = None
     block_size: int = 512
-    # Real-trace anchor:
+    # Recorded trace:
     static_trace: Optional[Path] = None
     # Set when a large static Mooncake trace is already sorted by ``timestamp``.
     # Lets ``materialize`` stream + early-stop at a cap instead of

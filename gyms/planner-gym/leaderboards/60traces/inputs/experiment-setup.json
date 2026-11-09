@@ -1,0 +1,1564 @@
+{
+  "rows": {
+    "A-HT-S01": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-HT-S01-knowline31b.yaml",
+        "sha256": "e315c33c8960c560d7d196ab95f03e837eceb072fb4e4f1d2003a663bd8e61ba"
+      }
+    },
+    "A-HT-S02": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-HT-S02-knowline31b.yaml",
+        "sha256": "bcec676f4ac54fe0aec3e00291f1464d292843b9060102f017fe5f28561c7779"
+      }
+    },
+    "A-HT-S03": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-HT-S03-knowline31b.yaml",
+        "sha256": "6bbe5fa99f31daf87c166e66e41ff3df7845ba079aa6a1e97195d914cbd5066f"
+      }
+    },
+    "A-HT-S04": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-HT-S04-knowline31b.yaml",
+        "sha256": "de8b4531d06cb0f9ce6d6e9be72aeda4b76d70c37ee412eb09bd4e9fbce9ea22"
+      }
+    },
+    "A-HT-S05": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-HT-S05-knowline31b.yaml",
+        "sha256": "96ba0db78aedde4dcf2658b943c5451c6d45d6e74800419b157fc0a86f515208"
+      }
+    },
+    "A-HT-S06": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-HT-S06-knowline31b.yaml",
+        "sha256": "4ba2dfba5324d61ab0d1c335f9c018ee6e305e25e7c0ce32317289b607f03d09"
+      }
+    },
+    "A-HT-S07": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-HT-S07-knowline31b.yaml",
+        "sha256": "c93d4f3a2fc6958e3cad8e3fc6017ec85577451f12e274ac2da88e0f9c52766f"
+      }
+    },
+    "A-HT-S08": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-HT-S08-knowline31b.yaml",
+        "sha256": "3ffaa66a005e780c93d48c1b2ba08bf0203d49c9c435067c6e8074332d80cc5d"
+      }
+    },
+    "A-HT-S09": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-HT-S09-knowline31b.yaml",
+        "sha256": "d0213b1cf346ef19b92f9b7afcb6fd800f117659b341bb6d88441f42af6aa11a"
+      }
+    },
+    "A-HT-S10": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-HT-S10-knowline31b.yaml",
+        "sha256": "00d608abbf8337838239ce2c225b766dfa78be5e3f0132c4fe532671862e3289"
+      }
+    },
+    "A-HT-L01": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 16
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 19
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 19
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/A-HT-L01-knowline31b.yaml",
+        "sha256": "15ef0761396e1021d5ae2a7970f988e911ef715d4099c1351a313bf555e1d430"
+      }
+    },
+    "A-HT-L02": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 16
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 19
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 19
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/A-HT-L02-knowline31b.yaml",
+        "sha256": "06ccb62ab7c5172bacfbdeece7b6d7c4521c33994b763e50b1c005135d7367d5"
+      }
+    },
+    "A-HT-L03": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 16
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 19
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 19
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/A-HT-L03-knowline31b.yaml",
+        "sha256": "4ac1975d633b8dfdd1aab087f334bb11f4ca8d622fc9f4585401b7afbf193ec1"
+      }
+    },
+    "A-HT-L04": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 16
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 19
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 19
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/A-HT-L04-knowline31b.yaml",
+        "sha256": "29b21d980e1a316b84fd923129ebc49c0137885726d77ce371009c485dfcc501"
+      }
+    },
+    "A-HT-L05": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 16
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 19
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 19
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/A-HT-L05-knowline31b.yaml",
+        "sha256": "1164cd4d0d5d8c1b32ee621320b3d5ff0eb75922bdf1858a87910fbaf62b600d"
+      }
+    },
+    "A-LC-S01": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-LC-S01-knowline31b.yaml",
+        "sha256": "9f7cdbf37e9b3b081f4e02d470b96bd3e374f19323367bff838b50ea1c04129d"
+      }
+    },
+    "A-LC-S02": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-LC-S02-knowline31b.yaml",
+        "sha256": "266f24698b713cdbd5b94cb994e33c598af91118011d7629902c765f4a664d5a"
+      }
+    },
+    "A-LC-S03": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-LC-S03-knowline31b.yaml",
+        "sha256": "7e49cc51332bc04efcc303d4c47937f5b0446ab5089dbf11035d5e23d33fbd02"
+      }
+    },
+    "A-LC-S04": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-LC-S04-knowline31b.yaml",
+        "sha256": "86f74275b028fada465360bfc5b16bbe29f0ec4bb7a27a47cf30e41cf4a35ba9"
+      }
+    },
+    "A-LC-S05": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-LC-S05-knowline31b.yaml",
+        "sha256": "709a1049c61c053fc4e7b8704906c2dc2738b4b7b1ad99073c516dd47fb88fb4"
+      }
+    },
+    "A-LC-S06": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-LC-S06-knowline31b.yaml",
+        "sha256": "115e13e83736fff85b35617a7553a66f773c700c1063d3470075e443d2f78443"
+      }
+    },
+    "A-LC-S07": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-LC-S07-knowline31b.yaml",
+        "sha256": "4471bbc6a7e8ee298152a60cecc7ba3ec877eaff1b627aed5e37f7bad3d1ab56"
+      }
+    },
+    "A-LC-S08": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-LC-S08-knowline31b.yaml",
+        "sha256": "ab2c3535f94e9a47174725f8c7e5417d509a37900536cc410335ef89347a986c"
+      }
+    },
+    "A-LC-S09": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-LC-S09-knowline31b.yaml",
+        "sha256": "f976c17a1a4e8ad4aae05f232d634a0f02a41de6e40e2032ed45c6171298df3c"
+      }
+    },
+    "A-LC-S10": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 2
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 5
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 5
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/A-LC-S10-knowline31b.yaml",
+        "sha256": "2c250214a1c87d0a3ef4a6efebeaad580f5bcd46243287bd666bbbbdf21cf54a"
+      }
+    },
+    "A-LC-L01": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 16
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 19
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 19
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/A-LC-L01-knowline31b.yaml",
+        "sha256": "c34efbbfb8e1837785e5ea910adc4681ba1b77d6877fce88db6208992bfa29c2"
+      }
+    },
+    "A-LC-L02": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 16
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 19
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 19
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/A-LC-L02-knowline31b.yaml",
+        "sha256": "e03eb2c1907c7ad9f2688ddafccc851c5b27a9865a527030dbf46e7fa6d63a28"
+      }
+    },
+    "A-LC-L03": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 16
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 19
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 19
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/A-LC-L03-knowline31b.yaml",
+        "sha256": "5c8d4f5b81ec9a0e4db5eda3cc11c7a8c4cf91675c9e0a8730b3d6f7e5bbc0de"
+      }
+    },
+    "A-LC-L04": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 16
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 19
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 19
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/A-LC-L04-knowline31b.yaml",
+        "sha256": "4ce72d9037a8b3f5d01eee2db734483c69bfe7b968b67f22432c30ac56a75cd0"
+      }
+    },
+    "A-LC-L05": {
+      "topology": "agg",
+      "gpus_per_worker": {
+        "aggregate": 8
+      },
+      "initial_workers": {
+        "aggregate": 16
+      },
+      "worker_limits": {
+        "min_total": 1,
+        "max_total": 19
+      },
+      "min_workers": {
+        "aggregate": 1
+      },
+      "max_workers": {
+        "aggregate": 19
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/A-LC-L05-knowline31b.yaml",
+        "sha256": "0b80963fd7c931d2a0ed2fce84190c889a2bc227779378e66e8202cc88b77010"
+      }
+    },
+    "D-HT-S01": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 5
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 4,
+        "decode": 4
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/D-HT-S01-knowline31b.yaml",
+        "sha256": "7f0a159d8821819479642416b70efd72835084253141754df1c0c6db9b113cd3"
+      }
+    },
+    "D-HT-S02": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 5
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 4,
+        "decode": 4
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/D-HT-S02-knowline31b.yaml",
+        "sha256": "4bf989013285d05ff7586cf91e5518dc52b35d4a92689a969920c5dfcb08d615"
+      }
+    },
+    "D-HT-S03": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 5
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 4,
+        "decode": 4
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/D-HT-S03-knowline31b.yaml",
+        "sha256": "493d7019e732680614ddfe9d46bca63cc8b9f862baedb5b71de7f65411ef50a6"
+      }
+    },
+    "D-HT-S04": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 5
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 4,
+        "decode": 4
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/D-HT-S04-knowline31b.yaml",
+        "sha256": "bd87736b5da5266a9589971aa1d8d20e81ffe4b57237de3daf76fca56e953d65"
+      }
+    },
+    "D-HT-S05": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 5
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 4,
+        "decode": 4
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/D-HT-S05-knowline31b.yaml",
+        "sha256": "21077a21f1c8a600927844e4a66d44febd979af895131572afc04f7c4ddca954"
+      }
+    },
+    "D-HT-S06": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 5
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 4,
+        "decode": 4
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/D-HT-S06-knowline31b.yaml",
+        "sha256": "5b0ce0f2e452b84d9af1fa3c22e4fe2519f184171a256571367a75796ffb20b5"
+      }
+    },
+    "D-HT-S07": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 5
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 4,
+        "decode": 4
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/D-HT-S07-knowline31b.yaml",
+        "sha256": "6a7cbccda802a58e90b901bba56478651f9cc2328494c99772e870bc5f064d93"
+      }
+    },
+    "D-HT-S08": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 5
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 4,
+        "decode": 4
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/D-HT-S08-knowline31b.yaml",
+        "sha256": "78364413c023ef08475a00800c4295e6601c9e3cfeff459a75988d660ab69df5"
+      }
+    },
+    "D-HT-S09": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 5
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 4,
+        "decode": 4
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/D-HT-S09-knowline31b.yaml",
+        "sha256": "f42a521ddfeacd7e1ebeceee7c05ab0772c6b8fc7e95565d1b55c6e26c38f316"
+      }
+    },
+    "D-HT-S10": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 5
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 4,
+        "decode": 4
+      },
+      "gpu_budget": 40,
+      "source_config": {
+        "path": "configs/D-HT-S10-knowline31b.yaml",
+        "sha256": "1cf6f6e967401fa7eaa1d7498d1a25e435c0b209c672ae92376ad50e8f1f0d9c"
+      }
+    },
+    "D-HT-L01": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 12,
+        "decode": 4
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 19
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 18,
+        "decode": 18
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/D-HT-L01-knowline31b.yaml",
+        "sha256": "604c8bb23afc55a8846061c198842e18010e639ebbb4baeff34b00feb940d05a"
+      }
+    },
+    "D-HT-L02": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 12,
+        "decode": 4
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 19
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 18,
+        "decode": 18
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/D-HT-L02-knowline31b.yaml",
+        "sha256": "fe438f9a5ad2d1b7565300b0f0c8dc8e8d926b4bc93bf8dc07bc88656145dca2"
+      }
+    },
+    "D-HT-L03": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 19
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 18,
+        "decode": 18
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/D-HT-L03-knowline31b.yaml",
+        "sha256": "dbaef63b09fc7c8eb97d1a5fc94d55533fb82cd0eea5f0af0784ddb2d146165a"
+      }
+    },
+    "D-HT-L04": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 12,
+        "decode": 4
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 19
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 18,
+        "decode": 18
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/D-HT-L04-knowline31b.yaml",
+        "sha256": "d5bfacbcd90fd0637b688d26bdd222e97b9df858e655c517a8f5b57ce3e01ce4"
+      }
+    },
+    "D-HT-L05": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 8,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 12,
+        "decode": 4
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 19
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 18,
+        "decode": 18
+      },
+      "gpu_budget": 152,
+      "source_config": {
+        "path": "configs/D-HT-L05-knowline31b.yaml",
+        "sha256": "0978b4a8a3969b2c29aa76669685270fb3e5c4c96322ef8df9dbe5e21c0a98f1"
+      }
+    },
+    "D-LC-S01": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 8
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 7,
+        "decode": 4
+      },
+      "gpu_budget": 36,
+      "source_config": {
+        "path": "configs/D-LC-S01-knowline31b.yaml",
+        "sha256": "bf5e07c4480e940191f602acce826ca944d2d4f37b1548404ceb53867758a9b8"
+      }
+    },
+    "D-LC-S02": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 8
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 7,
+        "decode": 4
+      },
+      "gpu_budget": 36,
+      "source_config": {
+        "path": "configs/D-LC-S02-knowline31b.yaml",
+        "sha256": "78624cf3e871291614fdc4f3056edea44c9483f41ce7bfa7bf50a00142d737f4"
+      }
+    },
+    "D-LC-S03": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 8
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 7,
+        "decode": 4
+      },
+      "gpu_budget": 36,
+      "source_config": {
+        "path": "configs/D-LC-S03-knowline31b.yaml",
+        "sha256": "862cea802596f090d8b7bb53d9c5ab95c8017cbd90662ea149d926b091b7d5df"
+      }
+    },
+    "D-LC-S04": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 8
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 7,
+        "decode": 4
+      },
+      "gpu_budget": 36,
+      "source_config": {
+        "path": "configs/D-LC-S04-knowline31b.yaml",
+        "sha256": "7e4cb948c9c53c1d8e25bbee67b42a87fe756f000f7b2942d2a769c800ee5b70"
+      }
+    },
+    "D-LC-S05": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 8
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 7,
+        "decode": 4
+      },
+      "gpu_budget": 36,
+      "source_config": {
+        "path": "configs/D-LC-S05-knowline31b.yaml",
+        "sha256": "fb5eec7bbd3019c4b4fee5f9f6af9b79543b0ee22da22b5141afc80278753643"
+      }
+    },
+    "D-LC-S06": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 8
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 7,
+        "decode": 4
+      },
+      "gpu_budget": 36,
+      "source_config": {
+        "path": "configs/D-LC-S06-knowline31b.yaml",
+        "sha256": "35e3f5fd41fdb4a1216330f2e5043de177e81fde1954ac171a3af9ce2ebc17c1"
+      }
+    },
+    "D-LC-S07": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 8
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 7,
+        "decode": 4
+      },
+      "gpu_budget": 36,
+      "source_config": {
+        "path": "configs/D-LC-S07-knowline31b.yaml",
+        "sha256": "64e04f9e58c07804110b7ac5a0c9db19657046e78f2b23c8cbf5e01f6a52d1ad"
+      }
+    },
+    "D-LC-S08": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 8
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 7,
+        "decode": 4
+      },
+      "gpu_budget": 36,
+      "source_config": {
+        "path": "configs/D-LC-S08-knowline31b.yaml",
+        "sha256": "2547d6fd7f843953cac23fb8557438734b9f5e4c59ceecb8a7e1248f5ae3d604"
+      }
+    },
+    "D-LC-S09": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 8
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 7,
+        "decode": 4
+      },
+      "gpu_budget": 36,
+      "source_config": {
+        "path": "configs/D-LC-S09-knowline31b.yaml",
+        "sha256": "524ce63319b8db0826f021cc22cf7df43fc94a6c93f58a7b002e9f631529c70e"
+      }
+    },
+    "D-LC-S10": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 8
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 7,
+        "decode": 4
+      },
+      "gpu_budget": 36,
+      "source_config": {
+        "path": "configs/D-LC-S10-knowline31b.yaml",
+        "sha256": "f52ece984e1f0255fe8fe567cf57ad6ad95e4b3bebb07a97fc31e30680fc2f64"
+      }
+    },
+    "D-LC-L01": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 4,
+        "decode": 12
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 33
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 32,
+        "decode": 16
+      },
+      "gpu_budget": 136,
+      "source_config": {
+        "path": "configs/D-LC-L01-knowline31b.yaml",
+        "sha256": "f0747930b5efdbca31c2fe13e7b549ecec2864535bc187d5c1f946c415d66df4"
+      }
+    },
+    "D-LC-L02": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 12,
+        "decode": 4
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 25
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 24,
+        "decode": 12
+      },
+      "gpu_budget": 104,
+      "source_config": {
+        "path": "configs/D-LC-L02-knowline31b.yaml",
+        "sha256": "f22d54abfbc0daac9822d35f71eb48978b647aeede3782c7149d108d5f411eb5"
+      }
+    },
+    "D-LC-L03": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 4,
+        "decode": 12
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 33
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 32,
+        "decode": 16
+      },
+      "gpu_budget": 136,
+      "source_config": {
+        "path": "configs/D-LC-L03-knowline31b.yaml",
+        "sha256": "aea8aa3e54f43e31f120a12104239a72275d05ee9ee7c86f93e66d31060ffb96"
+      }
+    },
+    "D-LC-L04": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 12,
+        "decode": 4
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 25
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 24,
+        "decode": 12
+      },
+      "gpu_budget": 104,
+      "source_config": {
+        "path": "configs/D-LC-L04-knowline31b.yaml",
+        "sha256": "b287a9ff5f95539043a73425fb4a9dec0595482965bff269401327163f16629f"
+      }
+    },
+    "D-LC-L05": {
+      "topology": "disagg",
+      "gpus_per_worker": {
+        "prefill": 4,
+        "decode": 8
+      },
+      "initial_workers": {
+        "prefill": 12,
+        "decode": 4
+      },
+      "worker_limits": {
+        "min_total": 2,
+        "max_total": 25
+      },
+      "min_workers": {
+        "prefill": 1,
+        "decode": 1
+      },
+      "max_workers": {
+        "prefill": 24,
+        "decode": 12
+      },
+      "gpu_budget": 104,
+      "source_config": {
+        "path": "configs/D-LC-L05-knowline31b.yaml",
+        "sha256": "16519d205967e22582d71823ba69d0e9d55cc8e3c1b944e91f3efebf1790f9ff"
+      }
+    }
+  }
+}

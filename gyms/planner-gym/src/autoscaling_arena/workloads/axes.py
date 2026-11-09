@@ -29,31 +29,6 @@ ShapeFn = Callable[["object"], "tuple[int, int]"]  # rng -> (isl, osl)
 # --------------------------------------------------------------------------
 
 
-def flat(rate: float) -> RateFn:
-    """Constant load."""
-    return lambda t: rate
-
-
-def staircase(base: float, step: float, step_interval_s: float) -> RateFn:
-    """Load that steps up by ``step`` req/s every ``step_interval_s``."""
-    return lambda t: base + step * math.floor(t / step_interval_s)
-
-
-def square_wave(low: float, high: float, period_s: float) -> RateFn:
-    """Alternates ``high`` and ``low`` each half-period (on/off bursts)."""
-    return lambda t: high if (t % period_s) < (period_s / 2.0) else low
-
-
-def flash_crowd(base: float, spike: float, spike_at_s: float, width_s: float) -> RateFn:
-    """Flat ``base`` with a single sharp spike to ``spike`` over a short window."""
-    return lambda t: spike if spike_at_s <= t < (spike_at_s + width_s) else base
-
-
-def diurnal(mean: float, amplitude: float, period_s: float) -> RateFn:
-    """Sinusoidal load (a compressed day/night cycle)."""
-    return lambda t: max(0.0, mean + amplitude * math.sin(2.0 * math.pi * t / period_s))
-
-
 def _poisson(rng, lam: float) -> int:
     """Knuth's algorithm — Poisson draw for small/moderate λ."""
     if lam <= 0.0:
@@ -89,27 +64,6 @@ def poisson_arrivals(
 # --------------------------------------------------------------------------
 # Shape axis — per-request (ISL, OSL) samplers
 # --------------------------------------------------------------------------
-
-
-def _lognormal_int(rng, median: float, sigma: float, lo: int = 1) -> int:
-    """Lognormal draw rounded to an int >= ``lo`` (median = exp(mu))."""
-    v = math.exp(rng.normalvariate(math.log(median), sigma))
-    return max(lo, int(round(v)))
-
-
-def prefill_heavy(rng) -> tuple[int, int]:
-    """Long context, short output (Mooncake-like): stresses prefill / TTFT."""
-    return _lognormal_int(rng, 6000, 0.8), _lognormal_int(rng, 34, 0.5)
-
-
-def decode_heavy(rng) -> tuple[int, int]:
-    """Short context, long output: stresses decode / ITL and decode capacity."""
-    return _lognormal_int(rng, 200, 0.5), _lognormal_int(rng, 600, 0.5)
-
-
-def balanced(rng) -> tuple[int, int]:
-    """Moderate context and output."""
-    return _lognormal_int(rng, 1000, 0.5), _lognormal_int(rng, 200, 0.5)
 
 
 # --------------------------------------------------------------------------

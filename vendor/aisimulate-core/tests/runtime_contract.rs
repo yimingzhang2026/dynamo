@@ -1,0 +1,1526 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use aisimulate_core::engine::{Backend, EngineConfig, TimingModel, TimingModelConfig};
+use aisimulate_core::replay::loadgen::ReplayRequestPayload;
+use aisimulate_core::replay::{
+    AggregatedRoundRobinPlacement, AuthoredKvHints, NoEngineEvents, NoReplayMetadata, Placement,
+    PlacementEffects, PlacementPolicy, PoolRoundRobinPlacement, ProviderSpec, ReplayAdapters,
+    ReplayCaptureOptions, ReplayComposition, ReplayDeterminism, ReplayEngineConfig,
+    ReplayEngineFactory, ReplayError, ReplayRequest, ReplayScalingDecision, ReplayScalingPolicy,
+    ReplayScalingSnapshot, ReplaySpec, ReplayTelemetryObserver, ReplayTelemetrySampleKind,
+    ReplayTelemetrySnapshot, ReplayTopology, Replayer, WorkerLifecycleTransitionKind, WorkerPool,
+    WorkerPoolSpec, WorkerTopology,
+};
+use uuid::Uuid;
+
+fn request(
+    id: &str,
+    arrival_time_ms: f64,
+    input_tokens: usize,
+    output_tokens: usize,
+) -> ReplayRequest {
+    ReplayRequest {
+        id: id.to_string(),
+        arrival_time_ms,
+        input_tokens,
+        input_token_ids: None,
+        output_tokens,
+        output_token_ids: None,
+        dp_rank: None,
+        prefill_dp_rank: None,
+        kv_hints: None,
+        session_id: None,
+        turn_index: None,
+        metadata: serde_json::Value::Null,
+    }
+}
+
+fn aggregated_spec(
+    backend: Backend,
+    workers: usize,
+    startup_delay_ms: f64,
+    requests: Vec<ReplayRequest>,
+) -> ReplaySpec {
+    let rank = EngineConfig {
+        num_gpu_blocks: 64,
+        block_size: 4,
+        max_num_seqs: 4,
+        max_num_batched_tokens: 64,
+        timing_model: TimingModelConfig::Fixed {
+            prefill_ms: 10.0,
+            decode_ms: 2.0,
+        },
+        ..EngineConfig::for_backend(backend)
+    };
+    ReplaySpec {
+        version: 1,
+        encoder: None,
+        topology: ReplayTopology::Aggregated {
+            workers: WorkerPoolSpec {
+                initial_workers: workers,
+                startup_delay_ms,
+            },
+        },
+        engine: serde_json::to_value(ReplayEngineConfig {
+            rank,
+            ..ReplayEngineConfig::default()
+        })
+        .unwrap(),
+        adapters: ReplayAdapters {
+            placement: ProviderSpec::round_robin(),
+            scaling: ProviderSpec::no_scaling(),
+        },
+        max_sim_time_ms: None,
+        max_in_flight: None,
+        record_per_request: true,
+        sla: Default::default(),
+        requests,
+    }
+}
+
+struct RecordingTelemetryObserver {
+    samples: Arc<Mutex<Vec<ReplayTelemetrySnapshot>>>,
+}
+
+impl ReplayTelemetryObserver for RecordingTelemetryObserver {
+    fn on_sample(&mut self, snapshot: ReplayTelemetrySnapshot) -> anyhow::Result<()> {
+        self.samples.lock().unwrap().push(snapshot);
+        Ok(())
+    }
+}
+
+struct FailingTelemetryObserver;
+
+impl ReplayTelemetryObserver for FailingTelemetryObserver {
+    fn on_sample(&mut self, _snapshot: ReplayTelemetrySnapshot) -> anyhow::Result<()> {
+        anyhow::bail!("telemetry sink failed")
+    }
+}
+
+#[test]
+fn grouped_cache_replay_emits_physical_bytes_without_scalar_block_capacity() {
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let mut req = request("windowed", 10.0, 1152, 4);
+    req.dp_rank = Some(0);
+    let mut spec = aggregated_spec(Backend::Vllm, 1, 0.0, vec![req]);
+    spec.engine["dp_size"] = serde_json::json!(2);
+    let rank = &mut spec.engine["rank"];
+    rank["enable_prefix_caching"] = false.into();
+    rank["max_num_batched_tokens"] = 128.into();
+    rank["kv_cache_capacity_bytes"] = 4000.into();
+    rank["kv_cache_groups"] = serde_json::json!([
+        {"name":"full", "kind":"attention", "num_layers":1, "block_size_tokens":64, "page_size_bytes":64},
+        {"name":"window", "kind":"attention", "num_layers":2, "block_size_tokens":16, "page_size_bytes":16, "sliding_window":512},
+        {"name":"conv", "kind":"convolution", "num_layers":3, "block_size_tokens":4, "page_size_bytes":8, "sliding_window":4}
+    ]);
+    let plain = Replayer::new(spec.clone(), ReplayEngineFactory::new())
+        .unwrap()
+        .run()
+        .unwrap();
+    let report = Replayer::new(spec, ReplayEngineFactory::new())
+        .unwrap()
+        .with_telemetry_observer(
+            1.0,
+            Box::new(RecordingTelemetryObserver {
+                samples: Arc::clone(&samples),
+            }),
+        )
+        .unwrap()
+        .run()
+        .unwrap();
+    assert_eq!(report.request_counts.completed_requests, 1);
+    assert_eq!(
+        report.request_counts.total_output_tokens,
+        plain.request_counts.total_output_tokens
+    );
+    let samples = samples.lock().unwrap();
+    let mut saw_resident_pages = false;
+    for sample in samples.iter() {
+        assert_eq!(sample.decode_scheduler_metrics.len(), 2);
+        for row in &sample.decode_scheduler_metrics {
+            assert_eq!((row.total_blocks, row.inactive_blocks), (0, 0));
+            assert_eq!(row.kv_cache_capacity_bytes, Some(4000));
+            let used = row.kv_cache_used_bytes.unwrap();
+            assert_eq!(row.active_blocks > 0, used > 0);
+            assert!(used <= 4000);
+            assert_eq!(row.physical_cache_usage, used as f64 / 4000.0);
+            if row.dp_rank == 1 {
+                assert_eq!(used, 0);
+            }
+            saw_resident_pages |= used > 0;
+            let emitted = serde_json::to_value(row).unwrap();
+            assert_eq!(emitted["kv_cache_used_bytes"], used);
+            assert_eq!(emitted["kv_cache_capacity_bytes"], 4000);
+        }
+    }
+    assert!(saw_resident_pages);
+    assert!(
+        samples
+            .last()
+            .unwrap()
+            .decode_scheduler_metrics
+            .iter()
+            .all(|row| row.kv_cache_used_bytes == Some(0))
+    );
+}
+
+#[test]
+fn replay_accept_length_counts_decode_work_before_output_truncation() {
+    for backend in [Backend::Vllm, Backend::Sglang] {
+        for (rates, lengths, forwards, expected_average) in [
+            (None, vec![0], [0, 0], None),
+            (None, vec![1], [0, 0], None),
+            (None, vec![2], [1, 1], Some(1.0)),
+            (None, vec![7, 2], [7, 7], Some(1.0)),
+            (Some("1,1"), vec![1], [0, 0], None),
+            (Some("1,1"), vec![4], [1, 1], Some(3.0)),
+            (Some("1,1"), vec![7], [2, 2], Some(3.0)),
+            (Some("1,1"), vec![8], [3, 3], Some(3.0)),
+            (Some("1,0"), vec![7], [3, 3], Some(2.0)),
+            (Some("0,0"), vec![7], [6, 6], Some(1.0)),
+        ] {
+            let samples = Arc::new(Mutex::new(Vec::new()));
+            let requests = lengths
+                .iter()
+                .enumerate()
+                .map(|(index, &length)| {
+                    request(&format!("request-{index}"), index as f64 * 5.0, 4, length)
+                })
+                .collect();
+            let mut spec = aggregated_spec(backend, 1, 0.0, requests);
+            spec.max_sim_time_ms = Some(1_000.0);
+            if let Some(rates) = rates {
+                let mut engine: ReplayEngineConfig =
+                    serde_json::from_value(spec.engine.clone()).unwrap();
+                engine.rank.aic_nextn = Some(2);
+                engine.rank.aic_nextn_accept_rates = Some(rates.into());
+                spec.engine = serde_json::to_value(engine).unwrap();
+            }
+            let report = Replayer::new(spec, ReplayEngineFactory::new())
+                .unwrap()
+                .with_telemetry_observer(
+                    1_000.0,
+                    Box::new(RecordingTelemetryObserver {
+                        samples: Arc::clone(&samples),
+                    }),
+                )
+                .unwrap()
+                .run()
+                .unwrap();
+            assert_eq!(report.request_counts.completed_requests, lengths.len());
+            let tokens = lengths.iter().sum::<usize>();
+            assert_eq!(report.request_counts.total_output_tokens, tokens);
+            let samples = samples.lock().unwrap();
+            let traffic = &samples.last().unwrap().traffic;
+            let expected_forwards = forwards[usize::from(backend == Backend::Sglang)];
+            assert_eq!(
+                traffic.accept_length_forward_count, expected_forwards,
+                "{backend:?}, {lengths:?}"
+            );
+            assert_eq!(
+                traffic.avg_accept_length, expected_average,
+                "{backend:?}, {lengths:?}, {rates:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn replay_accept_length_survives_rank_aggregation_and_prefill_handoffs() {
+    for backend in [Backend::Vllm, Backend::Sglang] {
+        for (dp_size, disaggregated) in [(1, false), (2, false), (2, true)] {
+            let samples = Arc::new(Mutex::new(Vec::new()));
+            let mut requests = vec![request("a", 0.0, 4, 4), request("b", 5.0, 4, 4)];
+            for (index, request) in requests.iter_mut().enumerate() {
+                request.dp_rank = Some(index as u32 % dp_size);
+            }
+            let mut spec = aggregated_spec(backend, 1, 0.0, requests);
+            spec.max_sim_time_ms = Some(1_000.0);
+            let mut engine: ReplayEngineConfig =
+                serde_json::from_value(spec.engine.clone()).unwrap();
+            engine.dp_size = dp_size;
+            engine.rank.aic_nextn = Some(2);
+            engine.rank.aic_nextn_accept_rates = Some("1,1".into());
+            spec.engine = serde_json::to_value(engine).unwrap();
+            if disaggregated {
+                spec.topology = ReplayTopology::Disaggregated {
+                    prefill: WorkerPoolSpec {
+                        initial_workers: 1,
+                        startup_delay_ms: 0.0,
+                    },
+                    decode: WorkerPoolSpec {
+                        initial_workers: 1,
+                        startup_delay_ms: 0.0,
+                    },
+                    handoff_latency_ms: 1.0,
+                };
+            }
+            let report = Replayer::new(spec, ReplayEngineFactory::new())
+                .unwrap()
+                .with_telemetry_observer(
+                    5.0,
+                    Box::new(RecordingTelemetryObserver {
+                        samples: Arc::clone(&samples),
+                    }),
+                )
+                .unwrap()
+                .run()
+                .unwrap();
+            assert_eq!(report.request_counts.completed_requests, 2);
+            assert_eq!(report.request_counts.total_output_tokens, 8);
+            let samples = samples.lock().unwrap();
+            let mut forwards = 0;
+            // This fixed 5 ms sample window contains both 2 ms decode rounds
+            // for each handoff. vLLM starts with one draft-free base token,
+            // then accepts three tokens, so its per-forward mean is (1+3)/2.
+            // SGLang's existing handoff behavior remains three per forward.
+            let expected_acceptance = if backend == Backend::Vllm && disaggregated {
+                2.0
+            } else {
+                3.0
+            };
+            for sample in samples.iter() {
+                let traffic = &sample.traffic;
+                assert_eq!(
+                    traffic.avg_accept_length,
+                    (traffic.accept_length_forward_count > 0).then_some(expected_acceptance),
+                    "{backend:?}, dp={dp_size}, pd={disaggregated}"
+                );
+                forwards += traffic.accept_length_forward_count;
+            }
+            // P/D uses the source output as a handoff signal; all four visible
+            // tokens are produced at decode. Aggregated prefill produces output.
+            assert_eq!(
+                forwards,
+                if disaggregated { 4 } else { 2 },
+                "{backend:?}, dp={dp_size}, pd={disaggregated}"
+            );
+        }
+    }
+}
+
+#[test]
+fn replay_accept_length_ignores_overlapping_prefill_and_rejection() {
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let mut spec = aggregated_spec(
+        Backend::Vllm,
+        1,
+        0.0,
+        vec![
+            request("decoding", 0.0, 4, 7),
+            request("prefill-only", 5.0, 4, 1),
+            request("rejected", 5.0, 65, 1),
+        ],
+    );
+    spec.max_sim_time_ms = Some(1_000.0);
+    let mut engine: ReplayEngineConfig = serde_json::from_value(spec.engine.clone()).unwrap();
+    engine.rank.max_model_len = Some(64);
+    engine.rank.aic_nextn = Some(2);
+    engine.rank.aic_nextn_accept_rates = Some("1,1".into());
+    spec.engine = serde_json::to_value(engine).unwrap();
+    let report = Replayer::new(spec, ReplayEngineFactory::new())
+        .unwrap()
+        .with_telemetry_observer(
+            1_000.0,
+            Box::new(RecordingTelemetryObserver {
+                samples: Arc::clone(&samples),
+            }),
+        )
+        .unwrap()
+        .run()
+        .unwrap();
+    assert_eq!(report.request_counts.completed_requests, 2);
+    assert_eq!(report.request_counts.total_output_tokens, 8);
+    assert_eq!(
+        report
+            .per_request
+            .iter()
+            .filter(|request| request.terminal_status
+                == aisimulate_core::replay::ReplayTerminalStatus::Rejected)
+            .count(),
+        1
+    );
+    let samples = samples.lock().unwrap();
+    let traffic = &samples.last().unwrap().traffic;
+    assert_eq!(traffic.accept_length_forward_count, 2);
+    assert_eq!(traffic.avg_accept_length, Some(3.0));
+}
+
+#[test]
+fn telemetry_baseline_preserves_t0_activity_and_emits_a_positive_final_tail() {
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let observer = RecordingTelemetryObserver {
+        samples: Arc::clone(&samples),
+    };
+    let spec = aggregated_spec(Backend::Vllm, 1, 0.0, vec![request("telemetry", 0.0, 4, 3)]);
+
+    let report = Replayer::new(spec, ReplayEngineFactory::new())
+        .unwrap()
+        .with_telemetry_observer(6.0, Box::new(observer))
+        .unwrap()
+        .run()
+        .unwrap();
+
+    assert_eq!(report.request_counts.completed_requests, 1);
+    let samples = samples.lock().unwrap();
+    assert!(samples.len() >= 3);
+
+    let baseline = &samples[0];
+    assert_eq!(baseline.sample_ordinal, 0);
+    assert_eq!(baseline.kind, ReplayTelemetrySampleKind::Baseline);
+    assert_eq!(baseline.interval_start_ms, 0.0);
+    assert_eq!(baseline.sampled_at_ms, 0.0);
+    assert_eq!(baseline.traffic.arriving_requests, 0);
+    assert_eq!(baseline.traffic.completed_requests, 0);
+    assert_eq!(baseline.decode_interval_metrics.cache_hit_tokens, 0);
+    assert_eq!(baseline.decode_interval_metrics.cache_total_tokens, 0);
+    assert_eq!(baseline.decode_interval_metrics.preemptions, 0);
+
+    let first_interval = &samples[1];
+    assert_eq!(first_interval.kind, ReplayTelemetrySampleKind::Periodic);
+    assert_eq!(first_interval.sampled_at_ms, 6.0);
+    assert_eq!(first_interval.traffic.arriving_requests, 1);
+
+    assert_eq!(
+        samples
+            .iter()
+            .skip(1)
+            .map(|sample| sample.traffic.arriving_requests)
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(
+        samples
+            .iter()
+            .skip(1)
+            .map(|sample| sample.traffic.completed_requests)
+            .sum::<usize>(),
+        1
+    );
+    let final_sample = samples.last().unwrap();
+    assert_eq!(final_sample.kind, ReplayTelemetrySampleKind::Final);
+    assert!(final_sample.sampled_at_ms > final_sample.interval_start_ms);
+    assert!(final_sample.traffic.duration_s > 0.0);
+}
+
+#[test]
+fn telemetry_observer_failures_keep_their_native_error_classification() {
+    let spec = aggregated_spec(
+        Backend::Vllm,
+        1,
+        0.0,
+        vec![request("telemetry-error", 0.0, 4, 1)],
+    );
+
+    let error = Replayer::new(spec, ReplayEngineFactory::new())
+        .unwrap()
+        .with_telemetry_observer(1.0, Box::new(FailingTelemetryObserver))
+        .unwrap()
+        .run()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ReplayError::Telemetry(message) if message.contains("telemetry sink failed")
+    ));
+}
+
+#[test]
+fn telemetry_interval_must_be_positive_and_finite() {
+    for interval_ms in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+        let spec = aggregated_spec(Backend::Vllm, 1, 0.0, Vec::new());
+        let error = match Replayer::new(spec, ReplayEngineFactory::new())
+            .unwrap()
+            .with_telemetry_observer(interval_ms, Box::new(FailingTelemetryObserver))
+        {
+            Ok(_) => panic!("invalid telemetry interval {interval_ms} was accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ReplayError::InvalidSpec(_)));
+    }
+}
+
+#[test]
+fn telemetry_sampling_does_not_perturb_the_replay_report() {
+    let spec = aggregated_spec(
+        Backend::Vllm,
+        1,
+        0.0,
+        vec![request("telemetry-neutral", 0.0, 4, 2)],
+    );
+    let capture = ReplayCaptureOptions {
+        determinism: ReplayDeterminism::CanonicalV1,
+        ..ReplayCaptureOptions::default()
+    };
+    let mut baseline = Replayer::new(spec.clone(), ReplayEngineFactory::new())
+        .unwrap()
+        .with_capture_options(capture)
+        .run()
+        .unwrap();
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let observer = RecordingTelemetryObserver {
+        samples: Arc::clone(&samples),
+    };
+    let mut observed = Replayer::new(spec, ReplayEngineFactory::new())
+        .unwrap()
+        .with_capture_options(capture)
+        .with_telemetry_observer(0.1, Box::new(observer))
+        .unwrap()
+        .run()
+        .unwrap();
+
+    baseline.throughput.wall_time_ms = 0.0;
+    observed.throughput.wall_time_ms = 0.0;
+    assert!(
+        (baseline.throughput.decode_worker_seconds - observed.throughput.decode_worker_seconds)
+            .abs()
+            < 1e-12
+    );
+    assert!((baseline.throughput.gpu_hours - observed.throughput.gpu_hours).abs() < 1e-12);
+    // Sampling splits the same resource integral into more floating-point
+    // additions, so normalize its sub-ULP representation before comparing all
+    // other compact-report fields exactly.
+    observed.throughput.decode_worker_seconds = baseline.throughput.decode_worker_seconds;
+    observed.throughput.gpu_hours = baseline.throughput.gpu_hours;
+    assert_eq!(
+        serde_json::to_value(&baseline).unwrap(),
+        serde_json::to_value(&observed).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&baseline.per_request).unwrap(),
+        serde_json::to_value(&observed.per_request).unwrap()
+    );
+    assert!(samples.lock().unwrap().len() > 2);
+}
+
+#[test]
+fn capped_telemetry_does_not_advance_agg_accounting_and_flushes_t0_observations() {
+    let mut spec = aggregated_spec(
+        Backend::Vllm,
+        1,
+        0.0,
+        vec![request("capped-telemetry", 0.0, 4, 2)],
+    );
+    spec.max_sim_time_ms = Some(0.0);
+    let capture = ReplayCaptureOptions {
+        determinism: ReplayDeterminism::CanonicalV1,
+        ..ReplayCaptureOptions::default()
+    };
+    let mut baseline = Replayer::new(spec.clone(), ReplayEngineFactory::new())
+        .unwrap()
+        .with_capture_options(capture)
+        .run()
+        .unwrap();
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let observer = RecordingTelemetryObserver {
+        samples: Arc::clone(&samples),
+    };
+    let mut observed = Replayer::new(spec, ReplayEngineFactory::new())
+        .unwrap()
+        .with_capture_options(capture)
+        .with_telemetry_observer(0.1, Box::new(observer))
+        .unwrap()
+        .run()
+        .unwrap();
+
+    baseline.throughput.wall_time_ms = 0.0;
+    observed.throughput.wall_time_ms = 0.0;
+    assert_eq!(baseline.throughput.duration_ms, 0.0);
+    assert_eq!(observed.throughput.duration_ms, 0.0);
+    assert_eq!(baseline.throughput.decode_worker_seconds, 0.0);
+    assert_eq!(observed.throughput.decode_worker_seconds, 0.0);
+    assert_eq!(baseline.throughput.gpu_hours, 0.0);
+    assert_eq!(observed.throughput.gpu_hours, 0.0);
+    assert_eq!(
+        serde_json::to_value(&baseline).unwrap(),
+        serde_json::to_value(&observed).unwrap()
+    );
+
+    let samples = samples.lock().unwrap();
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].kind, ReplayTelemetrySampleKind::Baseline);
+    let final_sample = &samples[1];
+    assert_eq!(final_sample.kind, ReplayTelemetrySampleKind::Final);
+    assert_eq!(final_sample.interval_start_ms, 0.0);
+    assert_eq!(final_sample.sampled_at_ms, 0.0);
+    assert_eq!(final_sample.traffic.duration_s, 0.0);
+    assert_eq!(final_sample.traffic.arriving_requests, 1);
+}
+
+#[test]
+fn telemetry_heartbeats_do_not_advance_agg_through_a_capped_idle_gap() {
+    let mut spec = aggregated_spec(
+        Backend::Vllm,
+        1,
+        0.0,
+        vec![request("after-cap", 10.0, 4, 2)],
+    );
+    spec.max_sim_time_ms = Some(5.0);
+    let capture = ReplayCaptureOptions {
+        determinism: ReplayDeterminism::CanonicalV1,
+        ..ReplayCaptureOptions::default()
+    };
+    let mut baseline = Replayer::new(spec.clone(), ReplayEngineFactory::new())
+        .unwrap()
+        .with_capture_options(capture)
+        .run()
+        .unwrap();
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let observer = RecordingTelemetryObserver {
+        samples: Arc::clone(&samples),
+    };
+    let mut observed = Replayer::new(spec, ReplayEngineFactory::new())
+        .unwrap()
+        .with_capture_options(capture)
+        .with_telemetry_observer(1.0, Box::new(observer))
+        .unwrap()
+        .run()
+        .unwrap();
+
+    baseline.throughput.wall_time_ms = 0.0;
+    observed.throughput.wall_time_ms = 0.0;
+    assert_eq!(baseline.throughput.duration_ms, 0.0);
+    assert_eq!(observed.throughput.duration_ms, 0.0);
+    assert_eq!(
+        serde_json::to_value(&baseline).unwrap(),
+        serde_json::to_value(&observed).unwrap()
+    );
+
+    let samples = samples.lock().unwrap();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].kind, ReplayTelemetrySampleKind::Baseline);
+    assert_eq!(samples[0].sampled_at_ms, 0.0);
+}
+
+struct GeneralRoundRobinComposition {
+    scaling: Option<Box<dyn ReplayScalingPolicy>>,
+    scaling_construction_error: Option<&'static str>,
+}
+
+impl GeneralRoundRobinComposition {
+    fn fixed_capacity() -> Self {
+        Self {
+            scaling: None,
+            scaling_construction_error: None,
+        }
+    }
+
+    fn with_scaling(scaling: impl ReplayScalingPolicy + 'static) -> Self {
+        Self {
+            scaling: Some(Box::new(scaling)),
+            scaling_construction_error: None,
+        }
+    }
+
+    fn failing_scaling_construction(message: &'static str) -> Self {
+        Self {
+            scaling: None,
+            scaling_construction_error: Some(message),
+        }
+    }
+}
+
+impl ReplayComposition for GeneralRoundRobinComposition {
+    type Metadata = NoReplayMetadata;
+    type Observation = NoEngineEvents;
+    type AggregatedPlacement = AggregatedRoundRobinPlacement<()>;
+    type DisaggregatedPlacement = PoolRoundRobinPlacement<()>;
+
+    fn create_aggregated_placement(
+        &mut self,
+        dp_size: u32,
+        topology: Vec<WorkerTopology>,
+    ) -> anyhow::Result<Self::AggregatedPlacement> {
+        Ok(AggregatedRoundRobinPlacement::new(dp_size, topology))
+    }
+
+    fn create_disaggregated_placements(
+        &mut self,
+        _prefill_dp_size: u32,
+        prefill_topology: Vec<WorkerTopology>,
+        _decode_dp_size: u32,
+        decode_topology: Vec<WorkerTopology>,
+    ) -> anyhow::Result<(Self::DisaggregatedPlacement, Self::DisaggregatedPlacement)> {
+        Ok((
+            PoolRoundRobinPlacement::new(prefill_topology),
+            PoolRoundRobinPlacement::new(decode_topology),
+        ))
+    }
+
+    fn take_scaling_policy(&mut self) -> anyhow::Result<Option<Box<dyn ReplayScalingPolicy>>> {
+        if let Some(message) = self.scaling_construction_error {
+            anyhow::bail!(message);
+        }
+        Ok(self.scaling.take())
+    }
+}
+
+struct FailingPlacement;
+
+impl PlacementPolicy<ReplayRequestPayload> for FailingPlacement {
+    type Metadata = NoReplayMetadata;
+    type Observation = ();
+
+    fn place(
+        &mut self,
+        _request: &ReplayRequestPayload,
+        _metadata: Self::Metadata,
+        _session_id: Option<String>,
+        _now_ms: f64,
+    ) -> anyhow::Result<PlacementEffects> {
+        anyhow::bail!("router placement callback failed")
+    }
+
+    fn observe(
+        &mut self,
+        _observation: Self::Observation,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn cancel_pending(&mut self, _request_id: Uuid) -> bool {
+        false
+    }
+
+    fn request_terminal(
+        &mut self,
+        _request_id: Uuid,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn prefill_completed(
+        &mut self,
+        _request_id: Uuid,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn pending_count(&self) -> usize {
+        0
+    }
+
+    fn worker_ready(
+        &mut self,
+        _worker: WorkerTopology,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn worker_draining(
+        &mut self,
+        _worker: WorkerTopology,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn worker_removed(
+        &mut self,
+        _worker: WorkerTopology,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn topology_settled(&mut self, _now_ms: f64) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+}
+
+struct FailingPlacementComposition {
+    fail_construction: bool,
+}
+
+impl ReplayComposition for FailingPlacementComposition {
+    type Metadata = NoReplayMetadata;
+    type Observation = NoEngineEvents;
+    type AggregatedPlacement = FailingPlacement;
+    type DisaggregatedPlacement = FailingPlacement;
+
+    fn create_aggregated_placement(
+        &mut self,
+        _dp_size: u32,
+        _topology: Vec<WorkerTopology>,
+    ) -> anyhow::Result<Self::AggregatedPlacement> {
+        if self.fail_construction {
+            anyhow::bail!("router placement construction failed");
+        }
+        Ok(FailingPlacement)
+    }
+
+    fn create_disaggregated_placements(
+        &mut self,
+        _prefill_dp_size: u32,
+        _prefill_topology: Vec<WorkerTopology>,
+        _decode_dp_size: u32,
+        _decode_topology: Vec<WorkerTopology>,
+    ) -> anyhow::Result<(Self::DisaggregatedPlacement, Self::DisaggregatedPlacement)> {
+        if self.fail_construction {
+            anyhow::bail!("router placement construction failed");
+        }
+        Ok((FailingPlacement, FailingPlacement))
+    }
+}
+
+struct FailingScalingPolicy;
+
+impl ReplayScalingPolicy for FailingScalingPolicy {
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        Ok(0.0)
+    }
+
+    fn on_tick(
+        &mut self,
+        _snapshot: ReplayScalingSnapshot,
+    ) -> anyhow::Result<ReplayScalingDecision> {
+        anyhow::bail!("planner scaling callback failed")
+    }
+}
+
+struct FailingTimingModel;
+
+impl TimingModel for FailingTimingModel {
+    fn predict_prefill_ms(
+        &self,
+        _batch_size: usize,
+        _mean_isl: usize,
+        _mean_prefix: usize,
+    ) -> anyhow::Result<f64> {
+        anyhow::bail!("engine timing callback failed")
+    }
+
+    fn predict_decode_ms(
+        &self,
+        _batch_size: usize,
+        _active_kv_tokens: usize,
+        _mean_context_length: usize,
+        _total_kv_tokens: usize,
+    ) -> anyhow::Result<f64> {
+        anyhow::bail!("engine timing callback failed")
+    }
+}
+
+fn canonical_options() -> ReplayCaptureOptions {
+    ReplayCaptureOptions {
+        determinism: ReplayDeterminism::CanonicalV1,
+        ..ReplayCaptureOptions::default()
+    }
+}
+
+#[test]
+fn placement_construction_failure_retains_its_error_provenance() {
+    let error = Replayer::with_composition(
+        aggregated_spec(
+            Backend::Vllm,
+            1,
+            0.0,
+            vec![request("placement-construction", 0.0, 8, 2)],
+        ),
+        ReplayEngineFactory::new(),
+        FailingPlacementComposition {
+            fail_construction: true,
+        },
+    )
+    .unwrap()
+    .run()
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        ReplayError::Placement("router placement construction failed".to_string())
+    );
+}
+
+#[test]
+fn placement_callback_failure_retains_its_error_provenance() {
+    let error = Replayer::with_composition(
+        aggregated_spec(
+            Backend::Vllm,
+            1,
+            0.0,
+            vec![request("placement-callback", 0.0, 8, 2)],
+        ),
+        ReplayEngineFactory::new(),
+        FailingPlacementComposition {
+            fail_construction: false,
+        },
+    )
+    .unwrap()
+    .run()
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        ReplayError::Placement("router placement callback failed".to_string())
+    );
+}
+
+#[test]
+fn scaling_construction_failure_retains_its_error_provenance() {
+    let error = Replayer::with_composition(
+        aggregated_spec(
+            Backend::Vllm,
+            1,
+            0.0,
+            vec![request("scaling-construction", 0.0, 8, 2)],
+        ),
+        ReplayEngineFactory::new(),
+        GeneralRoundRobinComposition::failing_scaling_construction(
+            "planner scaling construction failed",
+        ),
+    )
+    .unwrap()
+    .run()
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        ReplayError::Scaling("planner scaling construction failed".to_string())
+    );
+}
+
+#[test]
+fn scaling_callback_failure_retains_its_error_provenance() {
+    let error = Replayer::with_composition(
+        aggregated_spec(
+            Backend::Vllm,
+            1,
+            0.0,
+            vec![request("scaling-callback", 0.0, 8, 2)],
+        ),
+        ReplayEngineFactory::new(),
+        GeneralRoundRobinComposition::with_scaling(FailingScalingPolicy),
+    )
+    .unwrap()
+    .run()
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        ReplayError::Scaling("planner scaling callback failed".to_string())
+    );
+}
+
+#[test]
+fn engine_callback_failure_retains_its_error_provenance() {
+    let mut spec = aggregated_spec(
+        Backend::Vllm,
+        1,
+        0.0,
+        vec![request("engine-callback", 0.0, 8, 2)],
+    );
+    let mut config: ReplayEngineConfig = serde_json::from_value(spec.engine.clone()).unwrap();
+    config.rank.timing_model = TimingModelConfig::External {
+        provider: "failing_test_timing".to_string(),
+        config: serde_json::Value::Null,
+    };
+    spec.engine = serde_json::to_value(config).unwrap();
+
+    let error = Replayer::new(
+        spec,
+        ReplayEngineFactory::with_timing_model(Arc::new(FailingTimingModel)),
+    )
+    .unwrap()
+    .run()
+    .unwrap_err();
+
+    let ReplayError::Engine(message) = error else {
+        panic!("expected an engine error, got {error:?}");
+    };
+    assert!(message.contains("engine timing callback failed"));
+}
+
+#[test]
+fn authored_rank_is_validated_by_the_default_aggregated_runtime() {
+    let mut spec = aggregated_spec(
+        Backend::Vllm,
+        1,
+        0.0,
+        vec![request("invalid-rank", 0.0, 8, 3)],
+    );
+    spec.requests[0].dp_rank = Some(1);
+
+    let default_error = Replayer::new(spec.clone(), ReplayEngineFactory::new())
+        .unwrap()
+        .with_capture_options(canonical_options())
+        .run()
+        .unwrap_err()
+        .to_string();
+    let general_error = Replayer::with_composition(
+        spec,
+        ReplayEngineFactory::new(),
+        GeneralRoundRobinComposition::fixed_capacity(),
+    )
+    .unwrap()
+    .with_capture_options(canonical_options())
+    .run()
+    .unwrap_err()
+    .to_string();
+
+    assert_eq!(default_error, general_error);
+    assert!(default_error.contains("preferred attention-DP rank 1 is out of range"));
+}
+
+#[test]
+fn authored_kv_hint_in_a_replay_spec_does_not_change_the_report() {
+    let run = |kv_hints: Option<AuthoredKvHints>| {
+        let requests = (0..4)
+            .map(|index| ReplayRequest {
+                kv_hints,
+                ..request(&format!("request-{index}"), f64::from(index) * 5.0, 8, 3)
+            })
+            .collect();
+        let mut spec = aggregated_spec(Backend::Vllm, 2, 0.0, requests);
+        spec.engine["dp_size"] = serde_json::json!(2);
+        let mut report = Replayer::new(spec, ReplayEngineFactory::new())
+            .unwrap()
+            .with_capture_options(canonical_options())
+            .run()
+            .unwrap();
+        report.throughput.wall_time_ms = 0.0;
+        // The compact summary omits per-request records, so compare them too.
+        (
+            serde_json::to_value(&report).unwrap(),
+            serde_json::to_value(&report.per_request).unwrap(),
+        )
+    };
+
+    // Without `kvcr` no engine acts on a hint, so a valid hint changes nothing.
+    let hinted = run(Some(AuthoredKvHints {
+        source_worker: 1,
+        source_dp_rank: 0,
+    }));
+    assert_eq!(hinted, run(None));
+    assert_eq!(hinted.0["completed_requests"], 4);
+}
+
+#[test]
+fn max_sim_time_is_a_soft_cap_for_the_aggregated_runtime() {
+    let requests = (0..5)
+        .map(|index| {
+            request(
+                &format!("request-{index}"),
+                f64::from(index) * 1_000.0,
+                4,
+                2,
+            )
+        })
+        .collect();
+    let mut capped = aggregated_spec(Backend::Vllm, 1, 0.0, requests);
+    capped.max_sim_time_ms = Some(2_500.0);
+
+    let report = Replayer::new(capped, ReplayEngineFactory::new())
+        .unwrap()
+        .with_capture_options(canonical_options())
+        .run()
+        .unwrap();
+
+    assert_eq!(report.request_counts.num_requests, 3);
+    assert_eq!(report.request_counts.completed_requests, 3);
+    assert!(report.throughput.duration_ms <= 2_500.0);
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ScalingObservation {
+    now_ms: f64,
+    active: Vec<usize>,
+    starting: Vec<usize>,
+    draining: Vec<usize>,
+}
+
+struct ScaleUpThenDown {
+    step: usize,
+    observations: Rc<RefCell<Vec<ScalingObservation>>>,
+}
+
+struct ReleaseOnTopologyCallbacks {
+    pending: VecDeque<Uuid>,
+    stable_scheduler_id: usize,
+    released_on_settled: bool,
+    ready_workers: Vec<usize>,
+    place_immediately: bool,
+}
+
+impl ReleaseOnTopologyCallbacks {
+    fn new(topology: Vec<WorkerTopology>) -> Self {
+        let stable_scheduler_id = topology[0].scheduler_ids[0];
+        Self {
+            pending: VecDeque::new(),
+            stable_scheduler_id,
+            released_on_settled: false,
+            ready_workers: topology.iter().map(|worker| worker.worker_id).collect(),
+            place_immediately: false,
+        }
+    }
+
+    fn release_next(&mut self, scheduler_id: usize) -> Vec<Placement> {
+        self.pending
+            .pop_front()
+            .map(|request_id| {
+                vec![Placement {
+                    request_id,
+                    scheduler_id,
+                    reported_overlap_tokens: 0,
+                    cache_sample: None,
+                    kv_hints: None,
+                    placement_replica_id: None,
+                }]
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl PlacementPolicy<ReplayRequestPayload> for ReleaseOnTopologyCallbacks {
+    type Metadata = NoReplayMetadata;
+    type Observation = ();
+
+    fn place(
+        &mut self,
+        request: &ReplayRequestPayload,
+        _metadata: Self::Metadata,
+        _session_id: Option<String>,
+        _now_ms: f64,
+    ) -> anyhow::Result<PlacementEffects> {
+        self.pending
+            .push_back(request.metadata().uuid.expect("test request UUID"));
+        if self.place_immediately {
+            return Ok(PlacementEffects {
+                decision: aisimulate_core::replay::PlacementDecision::Immediate(
+                    self.release_next(self.stable_scheduler_id).pop().unwrap(),
+                ),
+                released: Vec::new(),
+            });
+        }
+        Ok(PlacementEffects {
+            decision: aisimulate_core::replay::PlacementDecision::Queued,
+            released: Vec::new(),
+        })
+    }
+
+    fn observe(&mut self, _observation: (), _now_ms: f64) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn cancel_pending(&mut self, request_id: Uuid) -> bool {
+        let before = self.pending.len();
+        self.pending.retain(|pending| *pending != request_id);
+        self.pending.len() != before
+    }
+
+    fn request_terminal(
+        &mut self,
+        _request_id: Uuid,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn prefill_completed(
+        &mut self,
+        _request_id: Uuid,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(Vec::new())
+    }
+
+    fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn worker_ready(
+        &mut self,
+        worker: WorkerTopology,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        self.ready_workers.push(worker.worker_id);
+        Ok(self.release_next(worker.scheduler_ids[0]))
+    }
+
+    fn worker_draining(
+        &mut self,
+        _worker: WorkerTopology,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        Ok(self.release_next(self.stable_scheduler_id))
+    }
+
+    fn worker_removed(
+        &mut self,
+        worker: WorkerTopology,
+        _now_ms: f64,
+    ) -> anyhow::Result<Vec<Placement>> {
+        let index = self
+            .ready_workers
+            .iter()
+            .position(|id| *id == worker.worker_id)
+            .expect("only registered workers receive removal callbacks");
+        self.ready_workers.swap_remove(index);
+        Ok(self.release_next(self.stable_scheduler_id))
+    }
+
+    fn topology_settled(&mut self, _now_ms: f64) -> anyhow::Result<Vec<Placement>> {
+        if self.released_on_settled {
+            return Ok(Vec::new());
+        }
+        self.released_on_settled = true;
+        Ok(self.release_next(self.stable_scheduler_id))
+    }
+}
+
+struct TopologyReleaseComposition {
+    scaling: Option<Box<dyn ReplayScalingPolicy>>,
+}
+
+impl ReplayComposition for TopologyReleaseComposition {
+    type Metadata = NoReplayMetadata;
+    type Observation = NoEngineEvents;
+    type AggregatedPlacement = ReleaseOnTopologyCallbacks;
+    type DisaggregatedPlacement = ReleaseOnTopologyCallbacks;
+
+    fn create_aggregated_placement(
+        &mut self,
+        _dp_size: u32,
+        topology: Vec<WorkerTopology>,
+    ) -> anyhow::Result<Self::AggregatedPlacement> {
+        Ok(ReleaseOnTopologyCallbacks::new(topology))
+    }
+
+    fn create_disaggregated_placements(
+        &mut self,
+        _prefill_dp_size: u32,
+        prefill_topology: Vec<WorkerTopology>,
+        _decode_dp_size: u32,
+        decode_topology: Vec<WorkerTopology>,
+    ) -> anyhow::Result<(Self::DisaggregatedPlacement, Self::DisaggregatedPlacement)> {
+        Ok((
+            ReleaseOnTopologyCallbacks {
+                place_immediately: true,
+                ..ReleaseOnTopologyCallbacks::new(prefill_topology)
+            },
+            ReleaseOnTopologyCallbacks {
+                place_immediately: true,
+                ..ReleaseOnTopologyCallbacks::new(decode_topology)
+            },
+        ))
+    }
+
+    fn take_scaling_policy(&mut self) -> anyhow::Result<Option<Box<dyn ReplayScalingPolicy>>> {
+        Ok(self.scaling.take())
+    }
+}
+
+struct AddThenRemoveWorker {
+    step: usize,
+    removal_at_ms: f64,
+    scale_prefill: bool,
+}
+
+impl ReplayScalingPolicy for AddThenRemoveWorker {
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        Ok(0.0)
+    }
+
+    fn on_tick(
+        &mut self,
+        _snapshot: ReplayScalingSnapshot,
+    ) -> anyhow::Result<ReplayScalingDecision> {
+        let decision = match self.step {
+            0 => ReplayScalingDecision {
+                target_prefill: self.scale_prefill.then_some(2),
+                target_decode: Some(2),
+                next_tick_ms: Some(self.removal_at_ms),
+                ..ReplayScalingDecision::default()
+            },
+            1 => ReplayScalingDecision {
+                target_prefill: self.scale_prefill.then_some(1),
+                target_decode: Some(1),
+                ..ReplayScalingDecision::default()
+            },
+            _ => panic!("unexpected scaling tick {}", self.step),
+        };
+        self.step += 1;
+        Ok(decision)
+    }
+}
+
+impl ReplayScalingPolicy for ScaleUpThenDown {
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        Ok(100.0)
+    }
+
+    fn on_tick(
+        &mut self,
+        snapshot: ReplayScalingSnapshot,
+    ) -> anyhow::Result<ReplayScalingDecision> {
+        self.observations.borrow_mut().push(ScalingObservation {
+            now_ms: snapshot.now_ms,
+            active: snapshot.active_decode_ids,
+            starting: snapshot.starting_decode_ids,
+            draining: snapshot.draining_decode_ids,
+        });
+        let decision = match self.step {
+            0 => ReplayScalingDecision {
+                target_decode: Some(2),
+                next_tick_ms: Some(200.0),
+                ..ReplayScalingDecision::default()
+            },
+            1 => ReplayScalingDecision {
+                next_tick_ms: Some(300.0),
+                ..ReplayScalingDecision::default()
+            },
+            2 => ReplayScalingDecision {
+                target_decode: Some(1),
+                next_tick_ms: Some(400.0),
+                ..ReplayScalingDecision::default()
+            },
+            3 => ReplayScalingDecision::default(),
+            _ => panic!("unexpected scaling tick {}", self.step),
+        };
+        self.step += 1;
+        Ok(decision)
+    }
+}
+
+#[test]
+fn scaling_honors_startup_delay_then_scales_the_ready_worker_back_down() {
+    let observations = Rc::new(RefCell::new(Vec::new()));
+    let policy = ScaleUpThenDown {
+        step: 0,
+        observations: Rc::clone(&observations),
+    };
+    let mut spec = aggregated_spec(
+        Backend::Vllm,
+        1,
+        200.0,
+        vec![request("long-running", 0.0, 4, 2)],
+    );
+    let mut engine: ReplayEngineConfig = serde_json::from_value(spec.engine.clone()).unwrap();
+    engine.rank.timing_model = TimingModelConfig::Fixed {
+        prefill_ms: 1_000.0,
+        decode_ms: 1_000.0,
+    };
+    spec.engine = serde_json::to_value(engine).unwrap();
+    spec.adapters.scaling = ProviderSpec {
+        provider: "scripted_test_policy".to_string(),
+        config: serde_json::Value::Null,
+    };
+
+    let report = Replayer::with_composition(
+        spec,
+        ReplayEngineFactory::new(),
+        GeneralRoundRobinComposition::with_scaling(policy),
+    )
+    .unwrap()
+    .run()
+    .unwrap();
+
+    assert_eq!(
+        *observations.borrow(),
+        vec![
+            ScalingObservation {
+                now_ms: 100.0,
+                active: vec![0],
+                starting: vec![],
+                draining: vec![],
+            },
+            ScalingObservation {
+                now_ms: 200.0,
+                active: vec![0],
+                starting: vec![1],
+                draining: vec![],
+            },
+            ScalingObservation {
+                now_ms: 300.0,
+                active: vec![0, 1],
+                starting: vec![],
+                draining: vec![],
+            },
+            ScalingObservation {
+                now_ms: 400.0,
+                active: vec![0],
+                starting: vec![],
+                draining: vec![],
+            },
+        ]
+    );
+    assert_eq!(report.request_counts.completed_requests, 1);
+    assert_eq!(report.throughput.duration_ms, 2_000.0);
+    assert!((report.throughput.decode_worker_seconds - 2.2).abs() < 1e-9);
+}
+
+#[test]
+fn aggregated_topology_callbacks_dispatch_and_record_every_released_request() {
+    let requests = (0..4)
+        .map(|index| request(&format!("callback-{index}"), 0.0, 4, 2))
+        .collect();
+    let mut spec = aggregated_spec(Backend::Vllm, 1, 0.0, requests);
+    spec.adapters.scaling = ProviderSpec {
+        provider: "topology_callback_test".to_string(),
+        config: serde_json::Value::Null,
+    };
+
+    let report = Replayer::with_composition(
+        spec,
+        ReplayEngineFactory::new(),
+        TopologyReleaseComposition {
+            scaling: Some(Box::new(AddThenRemoveWorker {
+                step: 0,
+                removal_at_ms: 1.0,
+                scale_prefill: false,
+            })),
+        },
+    )
+    .unwrap()
+    .with_capture_options(ReplayCaptureOptions {
+        capture_lifecycle_evidence: true,
+        determinism: ReplayDeterminism::CanonicalV1,
+        ..ReplayCaptureOptions::default()
+    })
+    .run()
+    .unwrap();
+
+    assert_eq!(report.request_counts.completed_requests, 4);
+    let released = report
+        .runtime_evidence
+        .lifecycle_operations
+        .iter()
+        .filter(|operation| !operation.topology_released_request_uuids.is_empty())
+        .map(|operation| {
+            (
+                operation.cause,
+                operation.topology_released_request_uuids.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        released,
+        vec![
+            (
+                "planner_scale",
+                vec![
+                    Uuid::from_u128(1).to_string(),
+                    Uuid::from_u128(2).to_string(),
+                ],
+            ),
+            ("planner_scale", vec![Uuid::from_u128(3).to_string()],),
+            ("drain_settlement", vec![Uuid::from_u128(4).to_string()],),
+        ]
+    );
+}
+
+#[test]
+fn canceled_startup_is_captured_without_unregistering_an_unready_worker() {
+    for disaggregated in [false, true] {
+        let mut spec = aggregated_spec(
+            Backend::Vllm,
+            1,
+            100.0,
+            vec![request("long-running", 0.0, 4, 2)],
+        );
+        let mut engine: ReplayEngineConfig = serde_json::from_value(spec.engine.clone()).unwrap();
+        engine.rank.timing_model = TimingModelConfig::Fixed {
+            prefill_ms: 150.0,
+            decode_ms: 50.0,
+        };
+        spec.engine = serde_json::to_value(engine).unwrap();
+        if disaggregated {
+            spec.topology = ReplayTopology::Disaggregated {
+                prefill: WorkerPoolSpec {
+                    initial_workers: 1,
+                    startup_delay_ms: 100.0,
+                },
+                decode: WorkerPoolSpec {
+                    initial_workers: 1,
+                    startup_delay_ms: 100.0,
+                },
+                handoff_latency_ms: 0.0,
+            };
+        }
+        spec.adapters.scaling = ProviderSpec {
+            provider: "topology_callback_test".to_string(),
+            config: serde_json::Value::Null,
+        };
+        let report = Replayer::with_composition(
+            spec,
+            ReplayEngineFactory::new(),
+            TopologyReleaseComposition {
+                scaling: Some(Box::new(AddThenRemoveWorker {
+                    step: 0,
+                    removal_at_ms: 50.0,
+                    scale_prefill: disaggregated,
+                })),
+            },
+        )
+        .unwrap()
+        .with_capture_options(ReplayCaptureOptions {
+            capture_lifecycle_evidence: true,
+            ..ReplayCaptureOptions::default()
+        })
+        .run()
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 1);
+        let expected_duration_ms = if disaggregated { 250.0 } else { 200.0 };
+        assert_eq!(report.throughput.duration_ms, expected_duration_ms);
+        let operations = &report.runtime_evidence.lifecycle_operations;
+        let pools = if disaggregated {
+            vec![WorkerPool::Prefill, WorkerPool::Decode]
+        } else {
+            vec![WorkerPool::Agg]
+        };
+        assert_eq!(operations.len(), 2 * pools.len());
+        for pool in pools {
+            let pool_operations = operations
+                .iter()
+                .filter(|operation| operation.pool == pool)
+                .collect::<Vec<_>>();
+            assert_eq!(pool_operations.len(), 2);
+            let start = pool_operations[0];
+            assert_eq!(start.at_ms, 0.0);
+            assert_eq!(start.transitions.len(), 1);
+            assert_eq!(start.transitions[0].worker_id, 1);
+            assert_eq!(
+                start.transitions[0].transition,
+                WorkerLifecycleTransitionKind::WorkerStarting
+            );
+            let cancellation = pool_operations[1];
+            assert_eq!(cancellation.at_ms, 50.0);
+            assert_eq!(cancellation.transitions.len(), 1);
+            let removal = &cancellation.transitions[0];
+            assert_eq!(removal.worker_id, 1);
+            assert_eq!(
+                removal.transition,
+                WorkerLifecycleTransitionKind::WorkerRemoved
+            );
+            assert_eq!(removal.prior_state, Some("starting"));
+            assert_eq!(removal.reason, Some("startup_cancelled"));
+            assert_eq!(
+                removal.origin_operation_ordinal,
+                Some(start.operation_ordinal)
+            );
+            assert_eq!(cancellation.state_after_batch.active, vec![0]);
+            assert!(cancellation.state_after_batch.starting.is_empty());
+            assert!(cancellation.state_after_batch.draining.is_empty());
+            // The stale ready event at 100 ms must neither resurrect the canceled
+            // worker nor extend its provisioned interval in independently captured cost.
+            let captured_worker_seconds =
+                (report.throughput.duration_ms + cancellation.at_ms - start.at_ms) / 1_000.0;
+            let native_worker_seconds = match pool {
+                WorkerPool::Prefill => report.throughput.prefill_worker_seconds,
+                WorkerPool::Agg | WorkerPool::Decode => report.throughput.decode_worker_seconds,
+            };
+            assert!((native_worker_seconds - captured_worker_seconds).abs() < 1e-9);
+        }
+    }
+}

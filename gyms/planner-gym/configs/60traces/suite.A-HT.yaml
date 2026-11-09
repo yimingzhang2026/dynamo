@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+name: static-baseline-A-HT
+cases:
+- id: A-HT-S01
+  config: A-HT-S01.yaml
+  labels:
+    dataset: ragpulse
+- id: A-HT-S02
+  config: A-HT-S02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: A-HT-S03
+  config: A-HT-S03.yaml
+  labels:
+    dataset: azure-2024-conv
+- id: A-HT-S04
+  config: A-HT-S04.yaml
+  labels:
+    dataset: burstgpt-3
+- id: A-HT-S05
+  config: A-HT-S05.yaml
+  labels:
+    dataset: qwen-toc
+- id: A-HT-S06
+  config: A-HT-S06.yaml
+  labels:
+    dataset: qwen-coder
+- id: A-HT-S07
+  config: A-HT-S07.yaml
+  labels:
+    dataset: qwen-thinking
+- id: A-HT-S08
+  config: A-HT-S08.yaml
+  labels:
+    dataset: mooncake-toolagent
+- id: A-HT-S09
+  config: A-HT-S09.yaml
+  labels:
+    dataset: mooncake-conversation
+- id: A-HT-S10
+  config: A-HT-S10.yaml
+  labels:
+    dataset: art-chat
+- id: A-HT-L01
+  config: A-HT-L01.yaml
+  labels:
+    dataset: ragpulse
+- id: A-HT-L02
+  config: A-HT-L02.yaml
+  labels:
+    dataset: azure-2024-code
+- id: A-HT-L03
+  config: A-HT-L03.yaml
+  labels:
+    dataset: qwen-thinking
+- id: A-HT-L04
+  config: A-HT-L04.yaml
+  labels:
+    dataset: mooncake-synthetic
+- id: A-HT-L05
+  config: A-HT-L05.yaml
+  labels:
+    dataset: art-chat

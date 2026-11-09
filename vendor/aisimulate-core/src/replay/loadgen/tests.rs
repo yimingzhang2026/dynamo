@@ -1,0 +1,1733 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::HashSet;
+
+use tempfile::NamedTempFile;
+use uuid::Uuid;
+
+use super::trace::{
+    SharedBlocks, SyntheticHashIds, synthesize_trace_tokens, validate_synthesizable_prompt,
+};
+use super::*;
+
+fn write_trace(lines: &[serde_json::Value]) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    for line in lines {
+        use std::io::Write;
+        writeln!(file, "{}", serde_json::to_string(line).unwrap()).unwrap();
+    }
+    file
+}
+
+fn write_agentic_trace(rows: &[serde_json::Value]) -> NamedTempFile {
+    let mut lines = vec![serde_json::json!({
+        "schema": AGENTIC_MOONCAKE_SCHEMA,
+        "version": AGENTIC_MOONCAKE_VERSION,
+        "block_size": 4,
+        "hash_id_scope": "local",
+        "source": {"format": "test", "digest": "fixture"}
+    })];
+    lines.extend_from_slice(rows);
+    write_trace(&lines)
+}
+
+#[test]
+fn trace_synthesis_bounds_each_hash_block_to_remaining_input() {
+    let tokens = synthesize_trace_tokens(1, &[7], usize::MAX).unwrap();
+    assert_eq!(tokens, vec![7]);
+}
+
+#[test]
+fn trace_synthesis_rejects_capacity_overflow() {
+    let error = validate_synthesizable_prompt(1, &[7, 8], usize::MAX).unwrap_err();
+    assert!(error.to_string().contains("capacity overflow"));
+}
+
+#[test]
+fn trace_file_cardinality_validation_is_format_neutral() {
+    let empty = validate_trace_files(TraceFileFormat::Mooncake, &[]).unwrap_err();
+    assert!(empty.to_string().contains("at least one trace file"));
+
+    let paths = vec!["first.jsonl".into(), "second.jsonl".into()];
+    let multiple = validate_trace_files(TraceFileFormat::Mooncake, &paths).unwrap_err();
+    assert!(
+        multiple
+            .to_string()
+            .contains("requires exactly one trace file")
+    );
+}
+
+#[test]
+fn test_from_mooncake_single_turn_loads_fields_and_canonicalizes_hashes() {
+    let file = write_trace(&[serde_json::json!({
+        "timestamp": 123.0,
+        "input_length": 8,
+        "output_length": 4,
+        "hash_ids": [7, 8],
+        "priority": -3,
+        "strict_priority": 7,
+    })]);
+
+    let trace = Trace::from_mooncake(file.path(), 4).unwrap();
+    assert_eq!(trace.sessions.len(), 1);
+    let session = &trace.sessions[0];
+    assert_eq!(session.first_arrival_timestamp_ms, Some(123.0));
+    assert_eq!(session.turns.len(), 1);
+    assert_eq!(session.turns[0].input_length, 8);
+    assert_eq!(session.turns[0].max_output_tokens, 4);
+    assert_eq!(session.turns[0].hash_ids, vec![0, 1]);
+    assert_eq!(session.turns[0].priority, -3);
+    assert_eq!(session.turns[0].strict_priority, 7);
+}
+
+#[test]
+fn mooncake_hash_ids_preserve_identity_above_u32() {
+    let shared = 0xB300_0000_0000_0000_u64;
+    let distinct = 0xB300_0001_0000_0000_u64;
+    let file = write_trace(&[
+        serde_json::json!({
+            "input_length": 1,
+            "output_length": 1,
+            "hash_ids": [shared],
+        }),
+        serde_json::json!({
+            "input_length": 1,
+            "output_length": 1,
+            "hash_ids": [distinct],
+        }),
+        serde_json::json!({
+            "input_length": 1,
+            "output_length": 1,
+            "hash_ids": [shared],
+        }),
+    ]);
+
+    let trace = Trace::from_mooncake(file.path(), 1).unwrap();
+    let requests = trace.to_single_turn_requests().unwrap();
+
+    assert_ne!(requests[0].tokens, requests[1].tokens);
+    assert_eq!(requests[0].tokens, requests[2].tokens);
+}
+
+#[test]
+fn single_turn_requests_plan_missing_output_tokens_deterministically() {
+    let trace = Trace {
+        block_size: 1,
+        sessions: vec![
+            SessionTrace {
+                session_id: "missing".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![TurnTrace {
+                    input_length: 2,
+                    max_output_tokens: 3,
+                    hash_ids: vec![10, 11],
+                    ..Default::default()
+                }],
+            },
+            SessionTrace {
+                session_id: "authored".into(),
+                first_arrival_timestamp_ms: Some(1.0),
+                turns: vec![TurnTrace {
+                    input_length: 1,
+                    max_output_tokens: 2,
+                    output_token_ids: Some(vec![20, 21]),
+                    hash_ids: vec![12],
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+
+    let first = trace.to_single_turn_requests().unwrap();
+    let second = trace.to_single_turn_requests().unwrap();
+
+    assert_eq!(first[0].output_token_ids, second[0].output_token_ids);
+    assert_eq!(first[0].output_token_ids.as_ref().map(Vec::len), Some(3));
+    assert_eq!(first[1].output_token_ids.as_deref(), Some(&[20, 21][..]));
+}
+
+#[test]
+fn test_from_mooncake_preserves_output_token_replay_keys() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "request_id": "explicit",
+            "session_id": "s",
+            "input_length": 4,
+            "output_length": 2,
+            "output_token_ids": [10, 11],
+            "hash_ids": [1],
+        }),
+        serde_json::json!({
+            "session_id": "s",
+            "input_length": 4,
+            "output_length": 1,
+            "output_token_ids": [12],
+            "hash_ids": [2],
+        }),
+        serde_json::json!({
+            "input_length": 4,
+            "output_length": 1,
+            "output_token_ids": [13],
+            "hash_ids": [3],
+        }),
+    ]);
+
+    let trace = Trace::from_mooncake(file.path(), 4).unwrap();
+    assert_eq!(
+        trace.sessions[0].turns[0].replay_key.as_deref(),
+        Some("explicit")
+    );
+    assert_eq!(
+        trace.sessions[0].turns[0].output_token_ids.as_deref(),
+        Some(&[10, 11][..])
+    );
+    assert_eq!(
+        trace.sessions[0].turns[1].replay_key.as_deref(),
+        Some("s:1")
+    );
+    assert_eq!(
+        trace.sessions[0].turns[1].output_token_ids.as_deref(),
+        Some(&[12][..])
+    );
+    assert_eq!(
+        trace.sessions[1].turns[0].replay_key.as_deref(),
+        Some("line:2")
+    );
+
+    let request = trace.sessions[0].turns[0]
+        .to_direct_request(4, Uuid::from_u128(1), None)
+        .unwrap();
+    assert_eq!(request.output_token_ids.as_deref(), Some(&[10, 11][..]));
+}
+
+#[test]
+fn test_from_mooncake_rejects_output_token_length_mismatch() {
+    let file = write_trace(&[serde_json::json!({
+        "input_length": 4,
+        "output_length": 2,
+        "output_token_ids": [10],
+        "hash_ids": [1],
+    })]);
+
+    let err = Trace::from_mooncake(file.path(), 4).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("output_length 2 does not match output_token_ids length 1"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn test_trace_validate_rejects_programmatic_output_token_length_mismatch() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![SessionTrace {
+            session_id: "s".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![TurnTrace {
+                input_length: 4,
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![10]),
+                hash_ids: vec![1],
+                delay_after_previous_ms: 0.0,
+                ..Default::default()
+            }],
+        }],
+    };
+
+    let err = trace.validate_for_trace_mode().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("max_output_tokens 2 does not match output_token_ids length 1"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn test_from_mooncake_multi_turn_uses_session_id_and_delay() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "session_id": "a",
+            "timestamp": 10.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1],
+        }),
+        serde_json::json!({
+            "session_id": "a",
+            "delay": 25.0,
+            "input_length": 8,
+            "output_length": 2,
+            "hash_ids": [1, 2],
+        }),
+        serde_json::json!({
+            "session_id": "b",
+            "timestamp": 20.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [3],
+        }),
+    ]);
+
+    let trace = Trace::from_mooncake(file.path(), 4).unwrap();
+    assert_eq!(trace.sessions.len(), 2);
+    assert_eq!(trace.sessions[0].session_id, "a");
+    assert_eq!(trace.sessions[0].turns.len(), 2);
+    assert_eq!(trace.sessions[0].turns[1].delay_after_previous_ms, 25.0);
+    assert_eq!(trace.sessions[1].session_id, "b");
+}
+
+#[test]
+fn test_from_mooncake_defaults_missing_input_length_from_hash_capacity() {
+    let file = write_trace(&[serde_json::json!({
+        "timestamp": 7.0,
+        "output_length": 3,
+        "hash_ids": [5, 6],
+    })]);
+
+    let trace = Trace::from_mooncake(file.path(), 4).unwrap();
+    assert_eq!(trace.sessions.len(), 1);
+    assert_eq!(trace.sessions[0].turns[0].input_length, 8);
+}
+
+#[test]
+fn compatible_agentic_loader_preserves_legacy_rows_and_independent_plays() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "request_id": "r1",
+            "session_id": "session-a",
+            "timestamp": 100.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1]
+        }),
+        serde_json::json!({
+            "request_id": "r2",
+            "session_id": "session-a",
+            "wait_for": ["r1"],
+            "delay": 10.0,
+            "tool_wait_ms": 6.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1]
+        }),
+        serde_json::json!({
+            "request_id": "r3",
+            "session_id": "session-b",
+            "timestamp": 120.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [2]
+        }),
+    ]);
+
+    let trace = load_agentic_mooncake(file.path(), 4).unwrap();
+
+    assert_eq!(trace.node_count(), 3);
+    assert_eq!(trace.play_count(), 2);
+    assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 16.0);
+}
+
+#[test]
+fn legacy_snapshot_preserves_recorded_starts_without_adding_execution_gates() {
+    for timestamp_field in ["timestamp", "created_time"] {
+        let mut root = serde_json::json!({
+            "request_id": "z-root", "input_length": 4,
+            "output_length": 1, "hash_ids": [1]
+        });
+        let mut child = serde_json::json!({
+            "request_id": "a-child", "wait_for": ["z-root"], "delay_ms": 25.0,
+            "input_length": 4, "output_length": 1, "hash_ids": [1]
+        });
+        root[timestamp_field] = 1000.0.into();
+        child[timestamp_field] = 2000.0.into();
+        let file = write_trace(&[root, child]);
+        let graph = load_agentic_mooncake(file.path(), 4).unwrap();
+        // Canonical sorting reverses input order; provenance must follow IDs.
+        assert_eq!(graph.nodes()[0].request_id(), "a-child");
+        assert_eq!(graph.nodes()[0].not_before_ms(), 0.0);
+        assert_eq!(graph.nodes()[1].not_before_ms(), 1000.0);
+        let mut cold = WorkloadDriver::new_agentic_trace(graph.clone(), 4).unwrap();
+        for (id, at_ms) in [("z-root", 1000.0), ("a-child", 1035.0)] {
+            assert_eq!(cold.next_ready_time_ms(), Some(at_ms));
+            let ready = cold.pop_ready(at_ms, 1).pop().unwrap();
+            assert_eq!(ready.authored_request_id.as_deref(), Some(id));
+            cold.on_complete(ready.request_uuid, at_ms + 10.0).unwrap();
+        }
+        assert!(cold.is_drained());
+
+        let prepared = graph
+            .prepare_snapshots(1, AgenticSnapshotOptions::seeded(0))
+            .unwrap();
+        let snapshot = &prepared.snapshots()[0];
+        assert!((1250.0..1750.0).contains(&snapshot.t_star_ms));
+        assert_eq!(snapshot.recorded_start_ms, 1000.0);
+        assert_eq!(snapshot.recorded_last_start_ms, 2000.0);
+        assert_eq!(snapshot.requests[0].recorded_start_ms, 2000.0);
+        assert!(!snapshot.requests[0].historical);
+        assert_eq!(snapshot.requests[1].recorded_start_ms, 1000.0);
+        assert!(snapshot.requests[1].historical);
+        assert!(
+            snapshot
+                .requests
+                .iter()
+                .all(|r| r.recorded_end_ms.is_none())
+        );
+        assert_eq!(snapshot.primers[0].source_request_id, "z-root");
+        let mut suffix = WorkloadDriver::new_agentic_snapshots(prepared, 4, true, 1.0).unwrap();
+        assert_eq!(suffix.total_turns(), 1);
+        assert_eq!(suffix.next_ready_time_ms(), Some(0.0));
+        let ready = suffix.pop_ready(0.0, 1).pop().unwrap();
+        assert_eq!(ready.authored_request_id.as_deref(), Some("a-child"));
+        suffix.on_complete(ready.request_uuid, 10.0).unwrap();
+        assert!(suffix.is_drained());
+
+        let mut without_provenance = graph.clone();
+        for node in &mut without_provenance.nodes {
+            node.recorded_interval_ms = None;
+        }
+        assert_eq!(
+            serde_json::to_value(graph.nodes()).unwrap(),
+            serde_json::to_value(without_provenance.nodes()).unwrap()
+        );
+        assert_eq!(
+            graph.speed_up_timing(1.0).unwrap().identity(),
+            without_provenance.speed_up_timing(1.0).unwrap().identity()
+        );
+    }
+}
+
+#[test]
+fn legacy_snapshot_retains_missing_times_and_rejects_invalid_recorded_starts() {
+    for timestamp in [None, Some(-1.0)] {
+        let root = serde_json::json!({
+            "request_id": "root", "input_length": 4,
+            "output_length": 1, "hash_ids": [1]
+        });
+        let mut child = serde_json::json!({
+            "request_id": "child", "wait_for": ["root"],
+            "input_length": 4, "output_length": 1, "hash_ids": [1]
+        });
+        if let Some(timestamp) = timestamp {
+            child["timestamp"] = timestamp.into();
+        }
+        let file = write_trace(&[root, child]);
+        let graph = load_agentic_mooncake(file.path(), 4).unwrap();
+        assert!(graph.nodes().iter().all(|node| node.not_before_ms() == 0.0));
+        let mut cold = WorkloadDriver::new_agentic_trace(graph.clone(), 4).unwrap();
+        for now_ms in [0.0, 10.0] {
+            let ready = cold.pop_ready(now_ms, 1).pop().unwrap();
+            cold.on_complete(ready.request_uuid, now_ms + 10.0).unwrap();
+        }
+        assert!(cold.is_drained());
+        let prepared = graph.prepare_snapshots(1, AgenticSnapshotOptions::seeded(0));
+        if timestamp.is_some() {
+            assert!(
+                prepared
+                    .unwrap_err()
+                    .to_string()
+                    .contains("recorded API interval overflow or invalid interval")
+            );
+        } else {
+            let prepared = prepared.unwrap();
+            let snapshot = &prepared.snapshots()[0];
+            assert_eq!(snapshot.t_star_ms, 0.0);
+            assert!(snapshot.requests.iter().all(|request| {
+                request.recorded_start_ms == 0.0
+                    && request.recorded_end_ms.is_none()
+                    && !request.historical
+            }));
+        }
+    }
+}
+
+#[test]
+fn compatible_agentic_loader_lowers_multi_root_join_to_one_typed_play() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "request_id": "r1", "timestamp": 0.0,
+            "input_length": 4, "output_length": 1, "hash_ids": [1]
+        }),
+        serde_json::json!({
+            "request_id": "r2", "timestamp": 5.0,
+            "input_length": 4, "output_length": 1, "hash_ids": [2]
+        }),
+        serde_json::json!({
+            "request_id": "r3", "wait_for": ["r1", "r2"],
+            "input_length": 4, "output_length": 1, "hash_ids": [3]
+        }),
+    ]);
+
+    let trace = load_agentic_mooncake(file.path(), 4).unwrap();
+
+    assert_eq!(trace.play_count(), 1);
+    assert_eq!(trace.node_count(), 3);
+    assert!(trace.nodes()[1].dependencies().is_empty());
+    assert_eq!(trace.nodes()[2].dependencies().len(), 2);
+
+    let mut driver = WorkloadDriver::new_agentic_trace(trace, 4).unwrap();
+    let first = driver.pop_ready(0.0, usize::MAX);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].authored_request_id.as_deref(), Some("r1"));
+    let second = driver.pop_ready(5.0, usize::MAX);
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].authored_request_id.as_deref(), Some("r2"));
+}
+
+#[test]
+fn test_from_agentic_mooncake_builds_typed_graph() {
+    let file = write_agentic_trace(&[
+        serde_json::json!({
+            "request_id": "r1",
+            "play_id": "play",
+            "session_id": "root",
+            "model": "model",
+            "not_before_ms": 0.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1],
+            "priority": 5,
+            "strict_priority": 6
+        }),
+        serde_json::json!({
+            "request_id": "r2",
+            "play_id": "play",
+            "session_id": "root",
+            "model": "model",
+            "not_before_ms": 100.0,
+            "dependencies": [{
+                "request_id": "r1",
+                "trigger": "dispatch",
+                "delay_ms": 12.0,
+                "relation": "spawn"
+            }],
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1]
+        }),
+    ]);
+
+    let trace = AgenticTrace::from_agentic_mooncake(file.path()).unwrap();
+    assert_eq!(trace.nodes.len(), 2);
+    assert_eq!(trace.nodes[0].request_id, "r1");
+    assert_eq!(trace.nodes[0].priority, 5);
+    assert_eq!(trace.nodes[0].strict_priority, 6);
+    assert_eq!(trace.nodes[1].dependencies.len(), 1);
+    assert_eq!(
+        trace.nodes[1].dependencies[0].trigger,
+        AgenticDependencyTrigger::Dispatch
+    );
+    assert_eq!(trace.nodes[1].dependencies[0].delay_ms, 12.0);
+    assert_eq!(trace.plays.len(), 1);
+    assert_eq!(trace.plays[0].root_nodes, vec![0]);
+}
+
+#[test]
+fn test_from_agentic_mooncake_rejects_unknown_dependency() {
+    let file = write_agentic_trace(&[serde_json::json!({
+        "request_id": "r1",
+        "play_id": "play",
+        "session_id": "root",
+        "model": "model",
+        "not_before_ms": 0.0,
+        "dependencies": [{
+            "request_id": "missing",
+            "trigger": "completion",
+            "delay_ms": 0.0,
+            "relation": "join"
+        }],
+        "input_length": 4,
+        "output_length": 1,
+        "hash_ids": [1]
+    })]);
+
+    let err = AgenticTrace::from_agentic_mooncake(file.path()).unwrap_err();
+    assert!(err.to_string().contains("unknown request_id"));
+}
+
+#[test]
+fn test_from_agentic_mooncake_rejects_input_length_above_hash_capacity() {
+    let file = write_agentic_trace(&[serde_json::json!({
+        "request_id": "r1",
+        "play_id": "play",
+        "session_id": "root",
+        "model": "model",
+        "not_before_ms": 0.0,
+        "input_length": 9,
+        "output_length": 1,
+        "hash_ids": [1, 2]
+    })]);
+
+    let err = AgenticTrace::from_agentic_mooncake(file.path()).unwrap_err();
+    assert!(err.to_string().contains("input_length 9"));
+}
+
+#[test]
+fn agentic_v2_rejects_invalid_schema_and_graph_contracts() {
+    enum Fixture {
+        Raw(Vec<serde_json::Value>),
+        Rows(Vec<serde_json::Value>),
+    }
+
+    let node = |request_id: &str, play_id: &str, dependencies: serde_json::Value| {
+        serde_json::json!({
+            "request_id": request_id,
+            "play_id": play_id,
+            "session_id": "session",
+            "model": "model",
+            "not_before_ms": 0.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1],
+            "dependencies": dependencies
+        })
+    };
+    let dependency = |request_id: &str| {
+        serde_json::json!({
+            "request_id": request_id,
+            "trigger": "completion",
+            "delay_ms": 0.0,
+            "relation": "sequence"
+        })
+    };
+    let cases = [
+        (
+            "headerless",
+            Fixture::Raw(vec![node("r1", "p", serde_json::json!([]))]),
+            "v2 header",
+        ),
+        (
+            "unknown version",
+            Fixture::Raw(vec![serde_json::json!({
+                "schema": AGENTIC_MOONCAKE_SCHEMA,
+                "version": AGENTIC_MOONCAKE_VERSION + 1,
+                "block_size": 4,
+                "hash_id_scope": "local",
+                "source": {"format": "test", "digest": "fixture"}
+            })]),
+            "unsupported agentic Mooncake version",
+        ),
+        (
+            "duplicate request",
+            Fixture::Rows(vec![
+                node("r1", "p", serde_json::json!([])),
+                node("r1", "p", serde_json::json!([])),
+            ]),
+            "duplicates request_id",
+        ),
+        (
+            "cycle",
+            Fixture::Rows(vec![
+                node("r1", "p", serde_json::json!([dependency("r2")])),
+                node("r2", "p", serde_json::json!([dependency("r1")])),
+            ]),
+            "cycle detected",
+        ),
+        (
+            "cross-play dependency",
+            Fixture::Rows(vec![
+                node("r1", "p1", serde_json::json!([])),
+                node("r2", "p2", serde_json::json!([dependency("r1")])),
+            ]),
+            "depends on request r1 in play p1",
+        ),
+        (
+            "invalid timing",
+            Fixture::Rows(vec![{
+                let mut value = node("r1", "p", serde_json::json!([]));
+                value["not_before_ms"] = serde_json::json!(-1.0);
+                value
+            }]),
+            "invalid not_before_ms",
+        ),
+        (
+            "invalid typed edge",
+            Fixture::Rows(vec![
+                node("r1", "p", serde_json::json!([])),
+                node(
+                    "r2",
+                    "p",
+                    serde_json::json!([{
+                        "request_id": "r1",
+                        "trigger": "dispatch",
+                        "delay_ms": 0.0,
+                        "relation": "join"
+                    }]),
+                ),
+            ]),
+            "invalid Join dependency with Dispatch trigger",
+        ),
+    ];
+
+    for (name, fixture, expected) in cases {
+        let file = match fixture {
+            Fixture::Raw(lines) => write_trace(&lines),
+            Fixture::Rows(rows) => write_agentic_trace(&rows),
+        };
+        let error = AgenticTrace::from_agentic_mooncake(file.path()).expect_err(name);
+        assert!(
+            format!("{error:#}").contains(expected),
+            "{name}: unexpected error: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn agentic_v2_rejects_ambiguous_source_play_order() {
+    let row = |request_id: &str, play_id: &str, ordinal: Option<usize>| {
+        let mut row = serde_json::json!({
+            "request_id": request_id,
+            "play_id": play_id,
+            "session_id": play_id,
+            "model": "model",
+            "not_before_ms": 0.0,
+            "input_length": 4,
+            "output_length": 1,
+            "hash_ids": [1]
+        });
+        if let Some(ordinal) = ordinal {
+            row["source_play_ordinal"] = ordinal.into();
+        }
+        row
+    };
+    let cases = [
+        (
+            "inconsistent rows",
+            vec![row("r1", "p1", Some(0)), row("r2", "p1", Some(1))],
+            "inconsistent source_play_ordinal",
+        ),
+        (
+            "partially ordered plays",
+            vec![row("r1", "p1", Some(0)), row("r2", "p2", None)],
+            "must be set for every play",
+        ),
+        (
+            "duplicate ordinals",
+            vec![row("r1", "p1", Some(0)), row("r2", "p2", Some(0))],
+            "unique and contiguous",
+        ),
+        (
+            "ordinal gap",
+            vec![row("r1", "p1", Some(0)), row("r2", "p2", Some(2))],
+            "unique and contiguous",
+        ),
+    ];
+
+    for (name, rows, expected) in cases {
+        let file = write_agentic_trace(&rows);
+        let error = AgenticTrace::from_agentic_mooncake(file.path()).expect_err(name);
+        assert!(
+            error.to_string().contains(expected),
+            "{name}: unexpected error: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn test_from_applied_compute_agentic_expands_rows_into_num_turns_plus_final_request() {
+    let file = write_trace(&[serde_json::json!({
+        "num_turns": 2,
+        "input_prompt_length": 100,
+        "assistant_response_length": [10, 20],
+        "tool_call_output_length": [30, 40],
+        "tool_call_latency": [0.5, 1.25],
+        "final_assistant_response_length": 50,
+    })]);
+
+    let trace = Trace::from_applied_compute_agentic(file.path(), 64, 0.0, 0).unwrap();
+    assert_eq!(trace.sessions.len(), 1);
+    let session = &trace.sessions[0];
+    assert_eq!(session.first_arrival_timestamp_ms, None);
+    assert_eq!(session.turns.len(), 3);
+    assert_eq!(session.turns[0].input_length, 100);
+    assert_eq!(session.turns[0].max_output_tokens, 10);
+    assert_eq!(session.turns[0].delay_after_previous_ms, 0.0);
+    assert_eq!(session.turns[1].input_length, 140);
+    assert_eq!(session.turns[1].max_output_tokens, 20);
+    assert_eq!(session.turns[1].delay_after_previous_ms, 500.0);
+    assert_eq!(session.turns[2].input_length, 200);
+    assert_eq!(session.turns[2].max_output_tokens, 50);
+    assert_eq!(session.turns[2].delay_after_previous_ms, 1250.0);
+}
+
+#[test]
+fn test_from_applied_compute_agentic_prefix_extends_hashes_across_turns() {
+    let file = write_trace(&[serde_json::json!({
+        "num_turns": 2,
+        "input_prompt_length": 600,
+        "assistant_response_length": [40, 50],
+        "tool_call_output_length": [40, 50],
+        "tool_call_latency": [0.1, 0.2],
+        "final_assistant_response_length": 60,
+    })]);
+
+    let trace = Trace::from_applied_compute_agentic(file.path(), 256, 0.0, 0).unwrap();
+    let turns = &trace.sessions[0].turns;
+    assert_eq!(turns[0].hash_ids, vec![0, 1, 2]);
+    assert_eq!(turns[1].hash_ids, vec![0, 1, 2]);
+    assert_eq!(turns[2].hash_ids, vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn test_from_applied_compute_agentic_can_share_initial_prefix_blocks_across_sessions() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "num_turns": 1,
+            "input_prompt_length": 600,
+            "assistant_response_length": [10],
+            "tool_call_output_length": [10],
+            "tool_call_latency": [0.1],
+            "final_assistant_response_length": 10,
+        }),
+        serde_json::json!({
+            "num_turns": 1,
+            "input_prompt_length": 600,
+            "assistant_response_length": [20],
+            "tool_call_output_length": [20],
+            "tool_call_latency": [0.2],
+            "final_assistant_response_length": 20,
+        }),
+    ]);
+
+    let trace = Trace::from_applied_compute_agentic(file.path(), 256, 0.5, 1).unwrap();
+    assert_eq!(
+        trace.sessions[0].turns[0].hash_ids[0],
+        trace.sessions[1].turns[0].hash_ids[0]
+    );
+    assert_eq!(
+        trace.sessions[0].turns[0].hash_ids[1],
+        trace.sessions[1].turns[0].hash_ids[1]
+    );
+    assert_ne!(
+        trace.sessions[0].turns[0].hash_ids[2],
+        trace.sessions[1].turns[0].hash_ids[2]
+    );
+}
+
+#[test]
+fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
+    let turn = TurnTrace {
+        input_length: 6,
+        max_output_tokens: 3,
+        output_token_ids: None,
+        replay_key: None,
+        hash_ids: vec![1, 2],
+        delay_after_previous_ms: 0.0,
+        priority: -2,
+        strict_priority: 8,
+        policy_class: None,
+        synthetic_session_id: false,
+        images: Vec::new(),
+    };
+
+    let request = turn
+        .to_direct_request(4, Uuid::from_u128(1), Some(5.0))
+        .unwrap();
+    assert_eq!(request.tokens, vec![1, 1, 1, 1, 2, 2]);
+    assert_eq!(request.arrival_timestamp_ms, Some(5.0));
+    assert_eq!(request.priority, -2);
+    assert_eq!(request.strict_priority, 8);
+}
+
+#[test]
+fn test_turn_replay_hashes_match_full_blocks_only() {
+    let turn = TurnTrace {
+        input_length: 6,
+        max_output_tokens: 3,
+        hash_ids: vec![1, 2],
+        delay_after_previous_ms: 0.0,
+        ..Default::default()
+    };
+
+    let request = turn
+        .to_direct_request(4, Uuid::from_u128(1), Some(5.0))
+        .unwrap();
+    let replay_hashes = turn.to_replay_hashes(4, 4).unwrap();
+    assert_eq!(
+        replay_hashes,
+        ReplayRequestHashes::from_tokens(&request.tokens, 4)
+    );
+    assert_eq!(replay_hashes.local_block_hashes.len(), 1);
+}
+
+#[test]
+fn test_replay_hashes_keep_legacy_encoding_across_repeated_blocks() {
+    fn legacy_hash(bytes: &[u8]) -> u64 {
+        xxhash_rust::xxh3::xxh3_64_with_seed(bytes, 1337)
+    }
+
+    // 64-token blocks take XXH3's long-input path. Cover repeated constant
+    // blocks, a change, a repeat after the change, repeated non-constant
+    // blocks, and an incomplete tail.
+    let block_size = 64;
+    let varied = (0..block_size as u32).collect::<Vec<_>>();
+    let tokens = [7_u32, 7, 9, 7]
+        .into_iter()
+        .flat_map(|token| std::iter::repeat_n(token, block_size))
+        .chain(varied.iter().copied())
+        .chain(varied.iter().copied())
+        .chain([1, 2, 3])
+        .collect::<Vec<_>>();
+
+    let mut expected = ReplayRequestHashes {
+        local_block_hashes: Vec::new(),
+        sequence_hashes: Vec::new(),
+    };
+    for block in tokens.chunks_exact(block_size) {
+        let bytes = block
+            .iter()
+            .flat_map(|token| token.to_le_bytes())
+            .collect::<Vec<_>>();
+        let local = legacy_hash(&bytes);
+        let sequence = expected.sequence_hashes.last().map_or(local, |parent| {
+            let mut chain = parent.to_le_bytes().to_vec();
+            chain.extend_from_slice(&local.to_le_bytes());
+            legacy_hash(&chain)
+        });
+        expected.local_block_hashes.push(local);
+        expected.sequence_hashes.push(sequence);
+    }
+
+    assert_eq!(
+        ReplayRequestHashes::from_tokens(&tokens, block_size as u32),
+        expected
+    );
+}
+
+#[test]
+fn test_trace_block_replay_hashes_match_synthesized_prompt_hashes() {
+    let hash_ids = [11_u32, 11, 12, 13, 13, 13, 14, 15];
+    for trace_block_size in [1, 3, 4, 5, 8, 64] {
+        for engine_block_size in [1_u32, 2, 3, 4, 6, 8, 16, 64] {
+            let capacity = hash_ids.len() * trace_block_size;
+            for input_length in [0, 1, capacity / 2 + 1, capacity - 1, capacity] {
+                let tokens = super::trace::synthesize_validated_trace_tokens(
+                    input_length,
+                    &hash_ids,
+                    trace_block_size,
+                );
+                assert_eq!(
+                    ReplayRequestHashes::from_trace_blocks(
+                        input_length,
+                        &hash_ids,
+                        trace_block_size,
+                        engine_block_size,
+                    ),
+                    ReplayRequestHashes::from_tokens(&tokens, engine_block_size),
+                    "trace block {trace_block_size}, engine block {engine_block_size}, \
+                     input length {input_length}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_turn_replay_hashes_support_distinct_trace_and_engine_block_sizes() {
+    let turn = TurnTrace {
+        input_length: 6,
+        max_output_tokens: 3,
+        hash_ids: vec![1, 2],
+        delay_after_previous_ms: 0.0,
+        ..Default::default()
+    };
+
+    let request = turn
+        .to_direct_request(4, Uuid::from_u128(2), Some(5.0))
+        .unwrap();
+    let replay_hashes = turn.to_replay_hashes(4, 2).unwrap();
+    assert_eq!(
+        replay_hashes,
+        ReplayRequestHashes::from_tokens(&request.tokens, 2)
+    );
+    assert_eq!(replay_hashes.local_block_hashes.len(), 3);
+}
+
+#[test]
+fn test_partition_by_session_round_robin_keeps_sessions_intact() {
+    let trace = Trace::synthetic(SyntheticTraceSpec {
+        block_size: 4,
+        num_sessions: 4,
+        turns_per_session: 2,
+        input_tokens: LengthSpec {
+            mean: 8,
+            stddev: 0.0,
+        },
+        output_tokens: LengthSpec {
+            mean: 2,
+            stddev: 0.0,
+        },
+        cached_prefix_tokens: 0,
+        shared_prefix_ratio: 0.5,
+        num_prefix_groups: 2,
+        first_turn_arrivals: ArrivalSpec::Burst,
+        inter_turn_delays: DelaySpec::ConstantMs(5.0),
+        seed: 7,
+        arrival_seed: 42,
+        images: None,
+    })
+    .unwrap();
+
+    let partitions =
+        trace.partition_by_session(SessionPartitionSpec::RoundRobin { num_partitions: 2 });
+    assert_eq!(partitions.len(), 2);
+    assert_eq!(partitions[0].sessions.len(), 2);
+    assert_eq!(partitions[1].sessions.len(), 2);
+    assert!(
+        partitions
+            .iter()
+            .flat_map(|partition| partition.sessions.iter())
+            .all(|session| session.turns.len() == 2)
+    );
+}
+
+#[test]
+fn test_synthetic_prefix_groups_share_prefixes_within_group() {
+    let trace = Trace::synthetic(SyntheticTraceSpec {
+        block_size: 4,
+        num_sessions: 6,
+        turns_per_session: 1,
+        input_tokens: LengthSpec {
+            mean: 16,
+            stddev: 0.0,
+        },
+        output_tokens: LengthSpec {
+            mean: 2,
+            stddev: 0.0,
+        },
+        cached_prefix_tokens: 0,
+        shared_prefix_ratio: 0.5,
+        num_prefix_groups: 2,
+        first_turn_arrivals: ArrivalSpec::Burst,
+        inter_turn_delays: DelaySpec::None,
+        seed: 42,
+        arrival_seed: 42,
+        images: None,
+    })
+    .unwrap();
+
+    let prefixes = trace
+        .sessions
+        .iter()
+        .map(|session| session.turns[0].hash_ids[..2].to_vec())
+        .collect::<HashSet<_>>();
+    let suffixes = trace
+        .sessions
+        .iter()
+        .map(|session| session.turns[0].hash_ids[2..].to_vec())
+        .collect::<HashSet<_>>();
+
+    assert_eq!(prefixes.len(), 2);
+    assert_eq!(suffixes.len(), trace.sessions.len());
+}
+
+#[test]
+fn test_synthetic_exact_cached_prefix_shares_only_requested_tokens() {
+    let trace = Trace::synthetic(SyntheticTraceSpec {
+        block_size: 1,
+        num_sessions: 3,
+        turns_per_session: 1,
+        input_tokens: LengthSpec {
+            mean: 8,
+            stddev: 0.0,
+        },
+        output_tokens: LengthSpec {
+            mean: 2,
+            stddev: 0.0,
+        },
+        cached_prefix_tokens: 3,
+        shared_prefix_ratio: 0.0,
+        num_prefix_groups: 0,
+        first_turn_arrivals: ArrivalSpec::Burst,
+        inter_turn_delays: DelaySpec::None,
+        seed: 42,
+        arrival_seed: 42,
+        images: None,
+    })
+    .unwrap();
+
+    let prompts = trace
+        .sessions
+        .iter()
+        .map(|session| session.turns[0].synthesize_tokens(1).unwrap())
+        .collect::<Vec<_>>();
+    assert!(prompts.windows(2).all(|pair| pair[0][..3] == pair[1][..3]));
+    assert_eq!(
+        prompts
+            .iter()
+            .map(|tokens| tokens[3..].to_vec())
+            .collect::<HashSet<_>>()
+            .len(),
+        prompts.len()
+    );
+}
+
+fn synthetic_image_spec(identity_pool: Option<u64>, block_size: usize) -> SyntheticTraceSpec {
+    SyntheticTraceSpec {
+        block_size,
+        num_sessions: 4,
+        turns_per_session: 1,
+        input_tokens: LengthSpec {
+            mean: 8,
+            stddev: 0.0,
+        },
+        output_tokens: LengthSpec {
+            mean: 2,
+            stddev: 0.0,
+        },
+        cached_prefix_tokens: 0,
+        shared_prefix_ratio: 0.0,
+        num_prefix_groups: 0,
+        first_turn_arrivals: ArrivalSpec::Burst,
+        inter_turn_delays: DelaySpec::None,
+        seed: 42,
+        arrival_seed: 42,
+        images: Some(SyntheticImages {
+            count: 2,
+            visual_tokens: 3,
+            encoder: crate::engine::EncoderShape {
+                sequences: 1,
+                patch_tokens: 12,
+                transformer_tokens: 12,
+                output_tokens: 3,
+            },
+            embedding_bytes: 128,
+            identity_pool,
+        }),
+    }
+}
+
+#[test]
+fn synthetic_image_identity_validation_does_not_overflow() {
+    for (identity_pool, expected) in [
+        (None, "image identity count overflow"),
+        (Some(1), "cannot combine cached or shared text prefixes"),
+        (Some((1 << 28) + 1), "image identities must not exceed 2^28"),
+    ] {
+        let mut spec = synthetic_image_spec(identity_pool, 1);
+        spec.num_sessions = 2;
+        spec.images.as_mut().unwrap().count = usize::MAX / 2 + 1;
+        // Validate past the identity check without ever allocating this workload.
+        // An explicit pool must not evaluate the overflowing default count.
+        spec.cached_prefix_tokens = 1;
+        let error = Trace::synthetic(spec).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn test_synthetic_images_precede_text_and_share_tokens_only_inside_pool() {
+    let pooled = Trace::synthetic(synthetic_image_spec(Some(2), 1)).unwrap();
+    let prompts = pooled
+        .sessions
+        .iter()
+        .map(|session| {
+            let turn = &session.turns[0];
+            assert_eq!(turn.input_length, 8 + 2 * 3);
+            assert_eq!(
+                turn.images
+                    .iter()
+                    .map(|image| (image.token_start, image.token_end))
+                    .collect::<Vec<_>>(),
+                vec![(0, 3), (3, 6)]
+            );
+            turn.synthesize_tokens(1).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let identities = pooled
+        .sessions
+        .iter()
+        .map(|session| {
+            session.turns[0]
+                .images
+                .iter()
+                .map(|image| image.identity)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    // A pool of two identities repeats every request; the placeholder tokens
+    // repeat with it while the text tail stays unique per request.
+    assert!(identities.iter().all(|ids| ids == &[0, 1]));
+    assert!(prompts.windows(2).all(|pair| pair[0][..6] == pair[1][..6]));
+    assert_eq!(
+        prompts
+            .iter()
+            .map(|tokens| tokens[6..].to_vec())
+            .collect::<HashSet<_>>()
+            .len(),
+        prompts.len()
+    );
+
+    let unique = Trace::synthetic(synthetic_image_spec(None, 1)).unwrap();
+    let placeholders = unique
+        .sessions
+        .iter()
+        .map(|session| session.turns[0].synthesize_tokens(1).unwrap()[..6].to_vec())
+        .collect::<HashSet<_>>();
+    assert_eq!(placeholders.len(), unique.sessions.len());
+    let request = unique.sessions[1].turns[0]
+        .to_direct_request(1, Uuid::from_u128(1), Some(0.0))
+        .unwrap();
+    assert_eq!(request.images, unique.sessions[1].turns[0].images);
+    assert_eq!(request.images[0].identity, 2);
+
+    assert!(Trace::synthetic(synthetic_image_spec(None, 4)).is_err());
+    let mut with_prefix = synthetic_image_spec(None, 1);
+    with_prefix.cached_prefix_tokens = 2;
+    assert!(Trace::synthetic(with_prefix).is_err());
+}
+
+#[test]
+fn test_synthetic_hash_ids_are_dense_in_first_seen_order() {
+    let trace = Trace::synthetic(SyntheticTraceSpec {
+        block_size: 1,
+        num_sessions: 6,
+        turns_per_session: 2,
+        input_tokens: LengthSpec {
+            mean: 8,
+            stddev: 0.0,
+        },
+        output_tokens: LengthSpec {
+            mean: 2,
+            stddev: 0.0,
+        },
+        cached_prefix_tokens: 2,
+        shared_prefix_ratio: 0.5,
+        num_prefix_groups: 2,
+        first_turn_arrivals: ArrivalSpec::Burst,
+        inter_turn_delays: DelaySpec::None,
+        seed: 42,
+        arrival_seed: 42,
+        images: None,
+    })
+    .unwrap();
+
+    // Cached prefix, then group prefix, then unique blocks.
+    let first_session = &trace.sessions[0].turns;
+    assert_eq!(first_session[0].hash_ids, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(first_session[1].hash_ids, vec![0, 1, 2, 3, 8, 9, 10, 11]);
+
+    // Synthetic hash IDs become token values, so a block's ID is the number of
+    // distinct blocks seen before it.
+    let turns = trace.sessions.iter().flat_map(|session| &session.turns);
+    let mut seen = HashSet::new();
+    for hash_id in turns.clone().flat_map(|turn| &turn.hash_ids) {
+        if seen.insert(*hash_id) {
+            assert_eq!(*hash_id as usize, seen.len() - 1);
+        }
+    }
+
+    // Every turn shares its first four blocks; each later block belongs to
+    // exactly one turn.
+    let prefix_ids = turns
+        .clone()
+        .flat_map(|turn| turn.hash_ids[..4].iter().copied())
+        .collect::<HashSet<_>>();
+    let mut suffix_ids = HashSet::new();
+    for hash_id in turns.flat_map(|turn| &turn.hash_ids[4..]) {
+        assert!(!prefix_ids.contains(hash_id) && suffix_ids.insert(*hash_id));
+    }
+}
+
+#[test]
+fn test_synthetic_hash_ids_number_each_shared_run_once() {
+    let mut ids = SyntheticHashIds::default();
+    let mut hash_ids = Vec::new();
+    ids.extend_shared(&mut hash_ids, SharedBlocks::Group(0), 2)
+        .unwrap();
+    ids.fill_unique(&mut hash_ids, 3).unwrap();
+    // Group 1 << 16 once shared group 0's packed prefix keys.
+    ids.extend_shared(&mut hash_ids, SharedBlocks::Group(1 << 16), 1)
+        .unwrap();
+    // An image never shares a text group's blocks.
+    ids.extend_shared(&mut hash_ids, SharedBlocks::Image(0), 1)
+        .unwrap();
+    // A longer run reuses its IDs and numbers only its new blocks.
+    ids.extend_shared(&mut hash_ids, SharedBlocks::Group(0), 3)
+        .unwrap();
+    assert_eq!(hash_ids, vec![0, 1, 2, 3, 4, 0, 1, 5]);
+}
+
+#[test]
+fn test_synthetic_hash_ids_stop_at_u32_max() {
+    let mut ids = SyntheticHashIds::default();
+    ids.next_id = u32::MAX as usize;
+    let mut hash_ids = Vec::new();
+    ids.fill_unique(&mut hash_ids, 1).unwrap();
+    let error = ids.fill_unique(&mut hash_ids, 2).unwrap_err();
+    assert!(error.to_string().contains("more unique hash IDs than u32"));
+    // A corrupt prompt length must not overflow the ID count either.
+    assert!(ids.fill_unique(&mut hash_ids, usize::MAX).is_err());
+    assert_eq!(hash_ids, vec![u32::MAX]);
+}
+
+#[test]
+fn test_synthetic_arrival_mode_changes_timestamps_only() {
+    let build = |first_turn_arrivals, arrival_seed| {
+        Trace::synthetic(SyntheticTraceSpec {
+            block_size: 4,
+            num_sessions: 20,
+            turns_per_session: 3,
+            input_tokens: LengthSpec {
+                mean: 16,
+                stddev: 3.0,
+            },
+            output_tokens: LengthSpec {
+                mean: 4,
+                stddev: 1.0,
+            },
+            cached_prefix_tokens: 0,
+            shared_prefix_ratio: 0.5,
+            num_prefix_groups: 5,
+            first_turn_arrivals,
+            inter_turn_delays: DelaySpec::ExponentialMs { mean_ms: 8.0 },
+            seed: 99,
+            arrival_seed,
+            images: None,
+        })
+        .unwrap()
+    };
+
+    let strip_timestamps = |trace: &mut Trace| {
+        trace
+            .sessions
+            .iter_mut()
+            .map(|session| session.first_arrival_timestamp_ms.take())
+            .collect::<Vec<_>>()
+    };
+
+    let mut fixed = build(ArrivalSpec::ConstantQps { qps: 25.0 }, 42);
+    let mut poisson = build(ArrivalSpec::PoissonQps { qps: 25.0 }, 42);
+    let mut reseeded_poisson = build(ArrivalSpec::PoissonQps { qps: 25.0 }, 7);
+    let fixed_timestamps = strip_timestamps(&mut fixed);
+    let poisson_timestamps = strip_timestamps(&mut poisson);
+    let reseeded_timestamps = strip_timestamps(&mut reseeded_poisson);
+    assert_ne!(fixed_timestamps, poisson_timestamps);
+    assert_ne!(poisson_timestamps, reseeded_timestamps);
+    assert_eq!(fixed, poisson);
+    assert_eq!(poisson, reseeded_poisson);
+}
+
+#[test]
+fn test_expand_hash_prefix_depth_scales_hashes_and_input_length() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![SessionTrace {
+            session_id: "session".to_string(),
+            first_arrival_timestamp_ms: Some(10.0),
+            turns: vec![TurnTrace {
+                input_length: 6,
+                max_output_tokens: 2,
+                hash_ids: vec![7, 8],
+                delay_after_previous_ms: 0.0,
+                ..Default::default()
+            }],
+        }],
+    }
+    .expand_hash_prefix_depth(3);
+
+    let turn = &trace.sessions[0].turns[0];
+    assert_eq!(turn.input_length, 18);
+    assert_eq!(turn.hash_ids, vec![21, 22, 23, 24, 25, 26]);
+
+    let request = turn
+        .to_direct_request(trace.block_size, Uuid::from_u128(2), Some(10.0))
+        .unwrap();
+    assert_eq!(request.tokens.len(), 18);
+}
+
+#[test]
+#[should_panic(expected = "hash prefix expansion overflow")]
+fn test_expand_hash_prefix_depth_rejects_offset_overflow() {
+    Trace {
+        block_size: 1,
+        sessions: vec![SessionTrace {
+            session_id: "session".to_string(),
+            first_arrival_timestamp_ms: None,
+            turns: vec![TurnTrace {
+                input_length: 1,
+                max_output_tokens: 1,
+                hash_ids: vec![u32::MAX / 3],
+                ..Default::default()
+            }],
+        }],
+    }
+    .expand_hash_prefix_depth(3);
+}
+
+#[test]
+fn test_rescale_ready_span_scales_session_starts_and_inter_turn_delays() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![
+            SessionTrace {
+                session_id: "a".to_string(),
+                first_arrival_timestamp_ms: Some(10.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    },
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![2],
+                        delay_after_previous_ms: 20.0,
+                        ..Default::default()
+                    },
+                ],
+            },
+            SessionTrace {
+                session_id: "b".to_string(),
+                first_arrival_timestamp_ms: Some(30.0),
+                turns: vec![TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![3],
+                    delay_after_previous_ms: 0.0,
+                    ..Default::default()
+                }],
+            },
+        ],
+    }
+    .rescale_ready_span(100)
+    .unwrap();
+
+    assert_eq!(trace.sessions[0].first_arrival_timestamp_ms, Some(0.0));
+    assert_eq!(trace.sessions[1].first_arrival_timestamp_ms, Some(100.0));
+    assert_eq!(trace.sessions[0].turns[1].delay_after_previous_ms, 100.0);
+}
+
+#[test]
+fn test_driver_requires_completion_before_follow_up_turn() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![SessionTrace {
+            session_id: "s".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![
+                TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![1],
+                    delay_after_previous_ms: 0.0,
+                    ..Default::default()
+                },
+                TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![2],
+                    delay_after_previous_ms: 10.0,
+                    ..Default::default()
+                },
+            ],
+        }],
+    };
+
+    let mut driver = trace.into_trace_driver().unwrap();
+    let first = driver.pop_ready(0.0, 1);
+    assert_eq!(first.len(), 1);
+    assert!(driver.pop_ready(100.0, 1).is_empty());
+
+    driver.on_complete(first[0].request_uuid, 5.0).unwrap();
+    assert!(driver.pop_ready(14.0, 1).is_empty());
+    let second = driver.pop_ready(15.0, 1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].turn_index, 1);
+}
+
+#[test]
+fn test_driver_next_ready_time_tracks_earliest_pending_turn() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![
+            SessionTrace {
+                session_id: "a".to_string(),
+                first_arrival_timestamp_ms: Some(10.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![1],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    },
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 1,
+                        hash_ids: vec![2],
+                        delay_after_previous_ms: 5.0,
+                        ..Default::default()
+                    },
+                ],
+            },
+            SessionTrace {
+                session_id: "b".to_string(),
+                first_arrival_timestamp_ms: Some(20.0),
+                turns: vec![TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 1,
+                    hash_ids: vec![3],
+                    delay_after_previous_ms: 0.0,
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+
+    let mut driver = trace.into_trace_driver().unwrap();
+    assert_eq!(driver.next_ready_time_ms(), Some(10.0));
+
+    let first = driver.pop_ready(10.0, 1);
+    assert_eq!(first.len(), 1);
+    assert_eq!(driver.next_ready_time_ms(), Some(20.0));
+
+    driver.on_complete(first[0].request_uuid, 25.0).unwrap();
+    assert_eq!(driver.next_ready_time_ms(), Some(20.0));
+
+    let second = driver.pop_ready(20.0, 1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(driver.next_ready_time_ms(), Some(30.0));
+}
+
+#[test]
+fn test_trace_driver_round_trips_turn_semantics_into_ready_requests() {
+    let trace = Trace {
+        block_size: 2,
+        sessions: vec![
+            SessionTrace {
+                session_id: "session-a".to_string(),
+                first_arrival_timestamp_ms: Some(10.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 4,
+                        max_output_tokens: 2,
+                        hash_ids: vec![1, 2],
+                        delay_after_previous_ms: 0.0,
+                        ..Default::default()
+                    },
+                    TurnTrace {
+                        input_length: 2,
+                        max_output_tokens: 3,
+                        hash_ids: vec![3],
+                        delay_after_previous_ms: 5.0,
+                        ..Default::default()
+                    },
+                ],
+            },
+            SessionTrace {
+                session_id: "session-b".to_string(),
+                first_arrival_timestamp_ms: Some(12.0),
+                turns: vec![TurnTrace {
+                    input_length: 2,
+                    max_output_tokens: 1,
+                    hash_ids: vec![4],
+                    delay_after_previous_ms: 0.0,
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+    let expected = trace.clone();
+    let mut driver = trace.into_trace_driver().unwrap();
+
+    assert!(driver.pop_ready(9.0, usize::MAX).is_empty());
+
+    let first = driver.pop_ready(10.0, usize::MAX);
+    assert_eq!(first.len(), 1);
+    let first = &first[0];
+    assert_eq!(first.session_id, "session-a");
+    assert_eq!(first.turn_index, 0);
+    assert_eq!(first.scheduled_ready_at_ms, 10.0);
+    assert_eq!(
+        first.request.tokens.len(),
+        expected.sessions[0].turns[0].input_length
+    );
+    assert_eq!(
+        first.request.max_output_tokens,
+        expected.sessions[0].turns[0].max_output_tokens
+    );
+    assert_eq!(first.request.arrival_timestamp_ms, Some(10.0));
+    assert_eq!(
+        first.replay_hashes.as_ref(),
+        Some(
+            &expected.sessions[0].turns[0]
+                .to_replay_hashes(expected.block_size, expected.block_size)
+                .unwrap()
+        )
+    );
+    let expected_first_request = expected.sessions[0].turns[0]
+        .to_direct_request(expected.block_size, first.request_uuid, Some(10.0))
+        .unwrap();
+    assert_eq!(first.request.tokens, expected_first_request.tokens);
+    assert_eq!(
+        first.request.max_output_tokens,
+        expected_first_request.max_output_tokens
+    );
+    assert_eq!(first.request.uuid, expected_first_request.uuid);
+    assert_eq!(
+        first.request.arrival_timestamp_ms,
+        expected_first_request.arrival_timestamp_ms
+    );
+
+    let second = driver.pop_ready(12.0, usize::MAX);
+    assert_eq!(second.len(), 1);
+    let second = &second[0];
+    assert_eq!(second.session_id, "session-b");
+    assert_eq!(second.turn_index, 0);
+    assert_eq!(second.scheduled_ready_at_ms, 12.0);
+    assert_eq!(
+        second.request.tokens.len(),
+        expected.sessions[1].turns[0].input_length
+    );
+    assert_eq!(
+        second.request.max_output_tokens,
+        expected.sessions[1].turns[0].max_output_tokens
+    );
+    assert_eq!(second.request.arrival_timestamp_ms, Some(12.0));
+    assert_eq!(
+        second.replay_hashes.as_ref(),
+        Some(
+            &expected.sessions[1].turns[0]
+                .to_replay_hashes(expected.block_size, expected.block_size)
+                .unwrap()
+        )
+    );
+
+    driver.on_complete(first.request_uuid, 20.0).unwrap();
+    assert!(driver.pop_ready(24.0, usize::MAX).is_empty());
+
+    let third = driver.pop_ready(25.0, usize::MAX);
+    assert_eq!(third.len(), 1);
+    let third = &third[0];
+    assert_eq!(third.session_id, "session-a");
+    assert_eq!(third.turn_index, 1);
+    assert_eq!(third.scheduled_ready_at_ms, 25.0);
+    assert_eq!(
+        third.request.tokens.len(),
+        expected.sessions[0].turns[1].input_length
+    );
+    assert_eq!(
+        third.request.max_output_tokens,
+        expected.sessions[0].turns[1].max_output_tokens
+    );
+    assert_eq!(third.request.arrival_timestamp_ms, Some(25.0));
+    assert_eq!(
+        third.replay_hashes.as_ref(),
+        Some(
+            &expected.sessions[0].turns[1]
+                .to_replay_hashes(expected.block_size, expected.block_size)
+                .unwrap()
+        )
+    );
+    let expected_third_request = expected.sessions[0].turns[1]
+        .to_direct_request(expected.block_size, third.request_uuid, Some(25.0))
+        .unwrap();
+    assert_eq!(third.request.tokens, expected_third_request.tokens);
+    assert_eq!(
+        third.request.max_output_tokens,
+        expected_third_request.max_output_tokens
+    );
+    assert_eq!(third.request.uuid, expected_third_request.uuid);
+    assert_eq!(
+        third.request.arrival_timestamp_ms,
+        expected_third_request.arrival_timestamp_ms
+    );
+}
+
+#[test]
+fn test_trace_driver_rechunks_trace_blocks_into_engine_blocks() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![SessionTrace {
+            session_id: "session-a".to_string(),
+            first_arrival_timestamp_ms: Some(10.0),
+            turns: vec![TurnTrace {
+                input_length: 6,
+                max_output_tokens: 2,
+                hash_ids: vec![1, 2],
+                delay_after_previous_ms: 0.0,
+                ..Default::default()
+            }],
+        }],
+    };
+    let mut driver = trace.into_trace_driver_with_block_size(2).unwrap();
+
+    let ready = driver.pop_ready(10.0, usize::MAX);
+    assert_eq!(ready.len(), 1);
+    let ready = &ready[0];
+    assert_eq!(ready.request.tokens, vec![1, 1, 1, 1, 2, 2]);
+    assert_eq!(
+        ready.replay_hashes.as_ref(),
+        Some(
+            &TurnTrace {
+                input_length: 6,
+                max_output_tokens: 2,
+                hash_ids: vec![1, 2],
+                delay_after_previous_ms: 0.0,
+                ..Default::default()
+            }
+            .to_replay_hashes(4, 2)
+            .unwrap()
+        )
+    );
+}
+
+#[test]
+fn synthetic_exact_cached_prefix_rejects_unaligned_and_overlong_values() {
+    for (prefix, expected) in [
+        (3, "must align"),
+        (12, "exceeds sampled synthetic input length"),
+    ] {
+        let error = Trace::synthetic(SyntheticTraceSpec {
+            block_size: 4,
+            num_sessions: 1,
+            turns_per_session: 1,
+            input_tokens: LengthSpec {
+                mean: 8,
+                stddev: 0.0,
+            },
+            output_tokens: LengthSpec {
+                mean: 2,
+                stddev: 0.0,
+            },
+            cached_prefix_tokens: prefix,
+            shared_prefix_ratio: 0.0,
+            num_prefix_groups: 0,
+            first_turn_arrivals: ArrivalSpec::Burst,
+            inter_turn_delays: DelaySpec::None,
+            seed: 42,
+            arrival_seed: 42,
+            images: None,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn legacy_anonymous_session_marker_is_part_of_graph_digest() {
+    let mut row = serde_json::json!({
+        "request_id": "root", "timestamp": 0.0,
+        "input_length": 4, "output_length": 1, "hash_ids": [1]
+    });
+    let file = write_trace(&[row.clone()]);
+    let trace = load_agentic_mooncake(file.path(), 4).unwrap();
+    let digest = trace.graph_digest().to_owned();
+    let trace = trace.speed_up_timing(1.0).unwrap();
+    assert_eq!(trace.graph_digest(), digest);
+
+    // An authored ID equal to the loader's fallback still has different serving semantics.
+    row["session_id"] = "agentic-session".into();
+    let authored_file = write_trace(&[row]);
+    let authored = load_agentic_mooncake(authored_file.path(), 4).unwrap();
+    assert_eq!(
+        trace.nodes()[0].session_id(),
+        authored.nodes()[0].session_id()
+    );
+    assert_ne!(authored.graph_digest(), digest);
+}

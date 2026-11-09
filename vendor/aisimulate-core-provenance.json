@@ -1,0 +1,18 @@
+{
+  "version": "0.13.0-dev.202610240000000082",
+  "upstream_crate_sha256": "fa3e351f2964f97c386e270dc1ef46e771b72542d5015d638a25f3b4eef34ccd",
+  "queue_core_sha256": "7d36899f767e6f290436f1b20d97b1226eed59ba8aea972775abf93deb0fac65",
+  "revision": "incremental-queue-stats-v1",
+  "changes": [
+    "Maintain conservative waiting-order bound for constant-time append lookup",
+    "Maintain pending/held decode statistics across reserve, activate and cancel",
+    "Expose optimization revision to runtime setup checks",
+    "Include two upstream fixtures omitted from published crate for scheduler test compilation",
+    "Expose completed-request SLO and latency feedback in aggregate and disaggregate replay telemetry"
+  ],
+  "validation": {
+    "scheduler_tests_passed": 205,
+    "request_records_compared": 60000
+  },
+  "license": "Apache-2.0"
+}

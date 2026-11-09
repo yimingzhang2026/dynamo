@@ -11,7 +11,7 @@ profiles, and exports a comparison leaderboard. Needs the ``aiperf`` CLI on PATH
 
     python scripts/run_endpoint_bench.py \\
         --endpoints configs/endpoints.example.yaml \\
-        --workloads flat staircase --profiles interactive relaxed
+        --workloads my-input --profiles interactive relaxed
 
 Note: the online backend runs in REAL time (AIPerf replays each trace at its
 timestamps), so prefer short workloads / a few endpoints for quick comparisons.
@@ -39,8 +39,8 @@ def main() -> int:
     p.add_argument(
         "--workloads",
         nargs="+",
-        default=["flat", "staircase"],
-        help="registry workload names, or 'all'",
+        required=True,
+        help="explicitly registered workload names, or 'all'",
     )
     p.add_argument(
         "--profiles",

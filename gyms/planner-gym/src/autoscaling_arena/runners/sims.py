@@ -30,11 +30,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
 
+from autoscaling_arena.runners.budgeted_replay import (
+    BudgetedReplayPlannerAdapter as ReplayPlannerAdapter,
+)
+
+from dynamo import _core as _native_core
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.engine_protocol import EngineProtocol
 from dynamo.planner.core.types import TrafficObservation, WorkerCapabilities
-from dynamo.planner.offline.replay_adapter import ReplayPlannerAdapter
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
 from dynamo.replay import planner as _replay_planner
 from dynamo.replay.config import load_engine_args as _load_engine_args
@@ -57,6 +61,16 @@ _generate_ais_decode_fpms = _replay_planner._generate_ais_decode_fpms
 _generate_ais_prefill_fpms = _replay_planner._generate_ais_prefill_fpms
 
 
+def _native_replay_accepts(parameter: str) -> bool:
+    """Whether the compiled replay entry point exposes ``parameter``.
+
+    Compiled bindings publish ``__text_signature__``. When it is unavailable
+    (a Python stand-in, for instance) assume the current contract.
+    """
+    signature = getattr(_run_mocker_trace_replay, "__text_signature__", None)
+    return signature is None or parameter in signature
+
+
 @dataclass(frozen=True)
 class ArenaReplayResult:
     """Arena timeline composed with Dynamo's canonical offline report."""
@@ -67,7 +81,7 @@ class ArenaReplayResult:
 
     @property
     def trace_report(self) -> dict[str, Any]:
-        """Backward-compatible view of the canonical replay summary."""
+        """Canonical replay summary."""
 
         return self.replay_report.summary
 
@@ -726,7 +740,7 @@ class _TelemetryContractValidator:
         if field:
             location = f"{location} ({field})"
         raise ValueError(
-            f"invalid {TELEMETRY_CONTRACT} telemetry JSONL at " f"{location}: {message}"
+            f"invalid {TELEMETRY_CONTRACT} telemetry JSONL at {location}: {message}"
         )
 
     def _required(
@@ -980,7 +994,7 @@ def _ingest_telemetry_jsonl(path: Path, planner: Any) -> _TelemetryJsonlIngestio
             sample_count += 1
     if sample_count == 0:
         raise ValueError(
-            f"invalid {TELEMETRY_CONTRACT} telemetry JSONL at {path}: " "file is empty"
+            f"invalid {TELEMETRY_CONTRACT} telemetry JSONL at {path}: file is empty"
         )
     return _TelemetryJsonlIngestion(
         timeline=_ReplayTelemetryTimeline.add_decisions(timeline, planner),
@@ -1040,7 +1054,7 @@ def _normalize_engine_args_role(
     Arena callers commonly reuse one role-neutral substrate JSON object for
     both disaggregated pools. Dynamo's unified replay validates the role on
     each engine launch config, so infer it from the slot unless the caller
-    already supplied ``worker_type`` or the legacy role flags.
+    already supplied ``worker_type`` or explicit role flags.
     """
 
     if raw_args is None:
@@ -1092,6 +1106,45 @@ def _normalize_engine_args_role(
             )
         perf_config["worker_type"] = expected
     return json.dumps(values)
+
+
+def _replay_telemetry_consumer(
+    engine: Any, *, telemetry_sample_interval_s: Optional[float]
+) -> Optional[Callable[[dict[str, Any]], None]]:
+    """Return the engine's telemetry hook when it consumes replay telemetry.
+
+    An adapter opts in with ``consumes_replay_telemetry = True`` and an
+    ``on_telemetry(sample)`` method; ``telemetry_interval_s`` (optional)
+    pins the cadence its observation contract was derived at. Running such
+    an adapter without telemetry, at another cadence, or on a Dynamo build
+    without ``telemetry_callback`` is a configuration error, not a silent
+    degradation.
+    """
+    if not getattr(engine, "consumes_replay_telemetry", False):
+        return None
+    name = type(engine).__name__
+    hook = getattr(engine, "on_telemetry", None)
+    if not callable(hook):
+        raise TypeError(f"{name} consumes replay telemetry but has no on_telemetry()")
+    if telemetry_sample_interval_s is None:
+        raise ValueError(
+            f"{name} consumes replay telemetry; set telemetry_sample_interval_s "
+            "(Match Config: backend.replay.telemetry_sample_interval_s)"
+        )
+    required = getattr(engine, "telemetry_interval_s", None)
+    if required is not None and not math.isclose(
+        float(required), float(telemetry_sample_interval_s)
+    ):
+        raise ValueError(
+            f"{name} observes telemetry at {float(required):g} s; the replay "
+            f"samples every {telemetry_sample_interval_s:g} s"
+        )
+    if not _native_replay_accepts("telemetry_callback"):
+        raise RuntimeError(
+            "this Dynamo build's run_mocker_trace_replay() has no "
+            f"telemetry_callback; {name} cannot observe replay telemetry"
+        )
+    return hook
 
 
 def _supports_planner_bootstrap(engine: EngineProtocol) -> bool:
@@ -1345,6 +1398,7 @@ def run_arena_replay(
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
     capture_per_request: bool = True,
+    capture_planner_details: bool = False,
     telemetry_sample_interval_s: Optional[float] = 5.0,
     telemetry_jsonl_path: Optional[str] = None,
     ais_bootstrap: bool = True,
@@ -1385,6 +1439,8 @@ def run_arena_replay(
             become the Planner's scaling targets for this run.
         capture_per_request: retain terminal request records in the canonical
             replay report so the scorecard can evaluate multiple SLO profiles.
+        capture_planner_details: retain per-tick planner diagnostics and charts.
+            Lifecycle and scaling events are always retained for exact scoring.
         telemetry_sample_interval_s: simulated-time cadence for persisted
             replay telemetry. ``None`` disables telemetry capture.
         telemetry_jsonl_path: optional durable JSONL destination for the replay
@@ -1401,6 +1457,15 @@ def run_arena_replay(
         An :class:`ArenaReplayResult` combining Dynamo's planner report with
         the Arena timeline and optional per-request records.
     """
+    if (
+        getattr(_native_core, "REPLAY_QUEUE_STATISTICS_REVISION", None)
+        != "incremental-queue-stats-v1"
+    ):
+        raise RuntimeError(
+            "The installed native simulator lacks incremental queue statistics. "
+            "Run scripts/ensure_queue_runtime.sh with this Dynamo checkout and "
+            "the simulation environment before starting another trace."
+        )
     if trace_file is not None and trace_files is not None:
         raise ValueError("trace_file and trace_files are mutually exclusive")
     if trace_file is None and trace_files is None:
@@ -1517,6 +1582,9 @@ def run_arena_replay(
         )
 
     engine = autoscaler(config, capabilities)
+    telemetry_consumer = _replay_telemetry_consumer(
+        engine, telemetry_sample_interval_s=telemetry_sample_interval_s
+    )
     warmup_observations = _planner_warmup_observations(config, engine)
     adapter = ReplayPlannerAdapter(
         planner_config=config,
@@ -1524,6 +1592,7 @@ def run_arena_replay(
         capabilities=capabilities,
         warmup_observations=warmup_observations,
         benchmark_granularity=benchmark_granularity,
+        capture_details=capture_planner_details,
     )
 
     temporary_telemetry_dir: Optional[tempfile.TemporaryDirectory[str]] = None
@@ -1555,6 +1624,13 @@ def run_arena_replay(
                     }
                 )
 
+            telemetry_kwargs: dict[str, Any] = {}
+            if telemetry_consumer is not None:
+                # Telemetry-driven policies observe every sample
+                # through the native callback, before the scaling callback at
+                # the same simulated instant; the JSONL artifact is still
+                # written. Other engines keep the native call unchanged.
+                telemetry_kwargs["telemetry_callback"] = telemetry_consumer
             native = _run_mocker_trace_replay(
                 replay_trace_files,
                 **(
@@ -1590,8 +1666,11 @@ def run_arena_replay(
                     str(telemetry_path) if telemetry_path is not None else None
                 ),
                 scaling_policy=adapter,
+                **telemetry_kwargs,
             )
             planner = adapter.finalize(native.lifecycle_operations)
+            # GPU-hour integration needs lifecycle events even without tick diagnostics.
+            planner.lifecycle_operations = list(native.lifecycle_operations)
             replay_report = ReplayReport(
                 summary=native.summary,
                 per_request=native.per_request if capture_per_request else None,

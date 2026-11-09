@@ -32,12 +32,24 @@ def _package(name: str) -> types.ModuleType:
     return module
 
 
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_replay_rejects_native_runtime_without_queue_fix(sims_module):
+    del sims_module._native_core.REPLAY_QUEUE_STATISTICS_REVISION
+    with pytest.raises(RuntimeError, match="ensure_queue_runtime.sh"):
+        sims_module.run_arena_replay(
+            trace_file="unused.jsonl", autoscaler=lambda *_: None, substrate_config={}
+        )
+
+
 @pytest.fixture
 def sims_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
     """Import the simulation wrapper without a built Dynamo runtime."""
 
     dynamo = _package("dynamo")
     dynamo_core = types.ModuleType("dynamo._core")
+    dynamo_core.REPLAY_QUEUE_STATISTICS_REVISION = "incremental-queue-stats-v1"
     dynamo_core.run_mocker_trace_replay = lambda *args, **kwargs: {}
     replay = _package("dynamo.replay")
     replay_config = types.ModuleType("dynamo.replay.config")
@@ -68,6 +80,8 @@ def sims_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
     planner_types.WorkerCapabilities = object
     replay_adapter = types.ModuleType("dynamo.planner.offline.replay_adapter")
     replay_adapter.ReplayPlannerAdapter = object
+    budgeted_replay = types.ModuleType("autoscaling_arena.runners.budgeted_replay")
+    budgeted_replay.BudgetedReplayPlannerAdapter = object
     trace_data = types.ModuleType("dynamo.planner.offline.trace_data")
     trace_data.extract_traffic_observations_from_trace = lambda path, interval: []
 
@@ -101,6 +115,7 @@ def sims_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
     replay_reporting.write_report_json = lambda *args, **kwargs: None
 
     stubs = {
+        "autoscaling_arena.runners.budgeted_replay": budgeted_replay,
         "dynamo": dynamo,
         "dynamo._core": dynamo_core,
         "dynamo.replay": replay,
@@ -701,6 +716,7 @@ def test_run_arena_replay_ingests_only_the_persisted_telemetry_stream(
             assert config.advisory is False
             assert kwargs["warmup_observations"] is None
             assert kwargs["benchmark_granularity"] == 8
+            assert kwargs["capture_details"] is False
 
         def __enter__(self):
             lifecycle.append("enter")
@@ -774,6 +790,9 @@ def test_run_arena_replay_ingests_only_the_persisted_telemetry_stream(
     )
 
     assert lifecycle == ["enter", "runtime", "finalize", "exit"]
+    assert result.replay_report.planner.lifecycle_operations == [
+        {"operation": "scale_up"}
+    ]
     assert bootstrap_calls[0]["performance_model_metadata"] == {
         "aggregated": {
             "provider": "ais",
@@ -936,7 +955,7 @@ def test_planner_warmup_uses_current_dynamo_observation_contract(
     monkeypatch.setattr(
         sims_module,
         "extract_traffic_observations_from_trace",
-        lambda path, interval: (calls.append((path, interval)) or observations),
+        lambda path, interval: calls.append((path, interval)) or observations,
     )
     config = types.SimpleNamespace(
         load_predictor_warmup_trace="warmup/*.jsonl",

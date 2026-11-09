@@ -321,6 +321,11 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
 }
 
 fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(feature = "ais-forward-pass")]
+    m.add(
+        "REPLAY_QUEUE_STATISTICS_REVISION",
+        aisimulate_core::QUEUE_STATISTICS_REVISION,
+    )?;
     // OTLP export no longer requires a pre-existing runtime, so initialize at import.
     if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
         rs::logging::init();

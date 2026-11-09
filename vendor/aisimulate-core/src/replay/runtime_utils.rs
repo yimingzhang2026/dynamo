@@ -1,0 +1,479 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::BinaryHeap;
+#[cfg(test)]
+use std::collections::VecDeque;
+
+use super::components::ScheduledEngineCompletion;
+use super::core::EngineEventBatch;
+use super::events::{
+    EnginePassCompletion, SimulationEvent, SimulationEventKind, SimulationWorkerStage,
+};
+use crate::engine::HandoffId;
+#[cfg(test)]
+use crate::replay::protocol::DirectRequest;
+
+/// Result of advancing a replay runtime to its next settled semantic boundary.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ReplayStepOutcome {
+    Settled { now_ms: f64 },
+    Complete,
+    TimeLimitReached { now_ms: f64 },
+}
+
+/// Upper bound on consecutive progressing internal-work steps at one instant.
+const MAX_CONSECUTIVE_INTERNAL_STEPS: usize = 1024;
+
+/// Repeat `step` until it stops progressing, failing instead of spinning when
+/// engine internal work (for example host transfers) never converges.
+pub(super) fn settle_internal_work(
+    now_ms: f64,
+    consecutive_steps: &mut usize,
+    mut step: impl FnMut() -> anyhow::Result<bool>,
+) -> anyhow::Result<bool> {
+    let mut changed = false;
+    while step()? {
+        *consecutive_steps += 1;
+        anyhow::ensure!(
+            *consecutive_steps < MAX_CONSECUTIVE_INTERNAL_STEPS,
+            "offline replay detected non-converging engine internal work at {now_ms} ms"
+        );
+        changed = true;
+    }
+    Ok(changed)
+}
+
+pub(super) fn next_timestamp(
+    next_arrival_ms: Option<f64>,
+    next_event_ms: Option<f64>,
+) -> Option<f64> {
+    match (next_arrival_ms, next_event_ms) {
+        (Some(arrival_ms), Some(event_ms)) => Some(arrival_ms.min(event_ms)),
+        (Some(arrival_ms), None) => Some(arrival_ms),
+        (None, Some(event_ms)) => Some(event_ms),
+        (None, None) => None,
+    }
+}
+
+/// Return the earliest scheduled event that can advance replay semantics.
+///
+/// At most one telemetry heartbeat is armed at a time. Temporarily removing
+/// it lets capped/deadlock logic inspect the canonical next event in O(log n)
+/// without allowing observation alone to keep or advance the simulation.
+pub(super) fn next_non_telemetry_event_ms<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+) -> Option<f64> {
+    if !events
+        .peek()
+        .is_some_and(|event| matches!(event.kind, SimulationEventKind::TelemetryTick))
+    {
+        return events.peek().map(|event| event.at_ms);
+    }
+
+    let telemetry = events
+        .pop()
+        .expect("peeked telemetry event must remain in the queue");
+    debug_assert!(
+        !events
+            .peek()
+            .is_some_and(|event| matches!(event.kind, SimulationEventKind::TelemetryTick)),
+        "replay must arm at most one telemetry tick"
+    );
+    let next_ms = events.peek().map(|event| event.at_ms);
+    events.push(telemetry);
+    next_ms
+}
+
+#[cfg(test)]
+pub(super) fn pop_next_trace_ready(
+    pending: &mut VecDeque<DirectRequest>,
+    now_ms: f64,
+) -> Option<(DirectRequest, f64)> {
+    let arrival_ms = pending
+        .front()
+        .and_then(|request| request.arrival_timestamp_ms)
+        .filter(|arrival_ms| *arrival_ms <= now_ms)?;
+    let request = pending
+        .pop_front()
+        .expect("front request must exist when arrival is ready");
+    Some((request, arrival_ms))
+}
+
+#[cfg(test)]
+pub(super) fn pop_next_concurrency_ready(
+    pending: &mut VecDeque<DirectRequest>,
+    now_ms: f64,
+    cluster_in_flight: usize,
+    max_in_flight: usize,
+) -> Option<(DirectRequest, f64)> {
+    if cluster_in_flight >= max_in_flight {
+        return None;
+    }
+    let request = pending.pop_front()?;
+    Some((request, now_ms))
+}
+
+pub(super) fn push_worker_completions<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+    next_event_seq: &mut u64,
+    scheduled: ScheduledEngineCompletion<Events>,
+) {
+    let ScheduledEngineCompletion { at_ms, completion } = scheduled;
+    events.push(SimulationEvent {
+        at_ms,
+        seq_no: *next_event_seq,
+        kind: SimulationEventKind::EnginePassCompletion(completion),
+    });
+    *next_event_seq = next_event_seq
+        .checked_add(1)
+        .expect("offline replay event sequence overflow");
+}
+
+pub(super) fn pop_ready_worker_completions<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+    now_ms: f64,
+) -> Option<EnginePassCompletion<Events>> {
+    let event = events.peek()?;
+    if event.at_ms != now_ms {
+        return None;
+    }
+    if !matches!(event.kind, SimulationEventKind::EnginePassCompletion(_)) {
+        return None;
+    }
+    let event = events.pop().expect("event must exist after peek");
+    match event.kind {
+        SimulationEventKind::EnginePassCompletion(completion) => Some(completion),
+        SimulationEventKind::TransferComplete { .. }
+        | SimulationEventKind::WorkerReady { .. }
+        | SimulationEventKind::ScalingTick
+        | SimulationEventKind::TelemetryTick => {
+            unreachable!("peeked engine completion event must match popped event")
+        }
+    }
+}
+
+pub(super) fn push_transfer_complete<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+    next_event_seq: &mut u64,
+    at_ms: f64,
+    handoff_id: HandoffId,
+) {
+    events.push(SimulationEvent {
+        at_ms,
+        seq_no: *next_event_seq,
+        kind: SimulationEventKind::TransferComplete { handoff_id },
+    });
+    *next_event_seq += 1;
+}
+
+pub(super) fn pop_ready_transfer_complete<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+    now_ms: f64,
+) -> Option<HandoffId> {
+    let event = events.peek()?;
+    if event.at_ms != now_ms {
+        return None;
+    }
+    let SimulationEventKind::TransferComplete { .. } = &event.kind else {
+        return None;
+    };
+    let event = events.pop().expect("event must exist after peek");
+    let SimulationEventKind::TransferComplete { handoff_id } = event.kind else {
+        unreachable!("peeked decode handoff event must match popped event");
+    };
+    Some(handoff_id)
+}
+
+pub(super) fn push_worker_ready<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+    next_event_seq: &mut u64,
+    at_ms: f64,
+    stage: SimulationWorkerStage,
+    worker_id: usize,
+) {
+    events.push(SimulationEvent {
+        at_ms,
+        seq_no: *next_event_seq,
+        kind: SimulationEventKind::WorkerReady { stage, worker_id },
+    });
+    *next_event_seq += 1;
+}
+
+pub(super) fn pop_ready_worker_ready<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+    now_ms: f64,
+) -> Option<(SimulationWorkerStage, usize)> {
+    let event = events.peek()?;
+    if event.at_ms != now_ms {
+        return None;
+    }
+    let SimulationEventKind::WorkerReady { .. } = &event.kind else {
+        return None;
+    };
+    let event = events.pop().expect("event must exist after peek");
+    let SimulationEventKind::WorkerReady { stage, worker_id } = event.kind else {
+        unreachable!("peeked worker ready event must match popped event");
+    };
+    Some((stage, worker_id))
+}
+
+pub(super) fn push_scaling_tick<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+    next_event_seq: &mut u64,
+    at_ms: f64,
+) {
+    events.push(SimulationEvent {
+        at_ms,
+        seq_no: *next_event_seq,
+        kind: SimulationEventKind::ScalingTick,
+    });
+    *next_event_seq += 1;
+}
+
+/// Pop a `ScalingTick` scheduled for exactly `now_ms` (peek-and-pop-at-now, like the
+/// other `pop_ready_*` helpers). Payload-free, so it returns whether one fired.
+pub(super) fn pop_ready_scaling_tick<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+    now_ms: f64,
+) -> bool {
+    let Some(event) = events.peek() else {
+        return false;
+    };
+    if event.at_ms != now_ms {
+        return false;
+    }
+    if !matches!(event.kind, SimulationEventKind::ScalingTick) {
+        return false;
+    }
+    events.pop().expect("event must exist after peek");
+    true
+}
+
+pub(super) fn push_telemetry_tick<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+    next_event_seq: &mut u64,
+    at_ms: f64,
+) {
+    events.push(SimulationEvent {
+        at_ms,
+        seq_no: *next_event_seq,
+        kind: SimulationEventKind::TelemetryTick,
+    });
+    *next_event_seq += 1;
+}
+
+pub(super) fn pop_ready_telemetry_tick<Events: EngineEventBatch>(
+    events: &mut BinaryHeap<SimulationEvent<Events>>,
+    now_ms: f64,
+) -> bool {
+    let Some(event) = events.peek() else {
+        return false;
+    };
+    if event.at_ms != now_ms {
+        return false;
+    }
+    if !matches!(event.kind, SimulationEventKind::TelemetryTick) {
+        return false;
+    }
+    events.pop().expect("event must exist after peek");
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_work_settles_until_idle_and_bounds_non_convergence() {
+        let mut steps = 0;
+        let mut progress = [true, true, false].into_iter();
+        assert!(settle_internal_work(5.0, &mut steps, || Ok(progress.next().unwrap())).unwrap());
+        assert!(!settle_internal_work(5.0, &mut steps, || Ok(false)).unwrap());
+        assert_eq!(steps, 2);
+        // The budget is shared by every settlement at one instant.
+        let error = settle_internal_work(7.5, &mut steps, || Ok(true)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "offline replay detected non-converging engine internal work at 7.5 ms"
+        );
+        assert_eq!(steps, MAX_CONSECUTIVE_INTERNAL_STEPS);
+    }
+    use crate::engine::generalized::PassId;
+    use crate::replay::components::ScheduledEngineCompletion;
+    use crate::replay::events::SimulationWorkerStage;
+    use uuid::Uuid;
+
+    fn direct_request(uuid: u128, arrival_timestamp_ms: Option<f64>) -> DirectRequest {
+        DirectRequest {
+            tokens: vec![1; 8],
+            max_output_tokens: 1,
+            output_token_ids: None,
+            uuid: Some(Uuid::from_u128(uuid)),
+            dp_rank: 0,
+            arrival_timestamp_ms,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_next_timestamp_matches_current_choice_logic() {
+        assert_eq!(next_timestamp(Some(1.0), Some(2.0)), Some(1.0));
+        assert_eq!(next_timestamp(Some(2.0), Some(1.0)), Some(1.0));
+        assert_eq!(next_timestamp(Some(3.0), None), Some(3.0));
+        assert_eq!(next_timestamp(None, Some(4.0)), Some(4.0));
+        assert_eq!(next_timestamp(None, None), None);
+    }
+
+    #[test]
+    fn next_non_telemetry_event_ignores_the_armed_heartbeat_without_consuming_it() {
+        let mut events: BinaryHeap<SimulationEvent<()>> = BinaryHeap::new();
+        let mut next_event_seq = 0;
+        push_telemetry_tick(&mut events, &mut next_event_seq, 1.0);
+
+        assert_eq!(next_non_telemetry_event_ms(&mut events), None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events.peek().unwrap().at_ms, 1.0);
+
+        push_worker_ready(
+            &mut events,
+            &mut next_event_seq,
+            5.0,
+            SimulationWorkerStage::Aggregated,
+            0,
+        );
+
+        assert_eq!(next_non_telemetry_event_ms(&mut events), Some(5.0));
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.peek().unwrap().at_ms, 1.0);
+        assert!(matches!(
+            events.peek().unwrap().kind,
+            SimulationEventKind::TelemetryTick
+        ));
+    }
+
+    #[test]
+    fn test_pop_next_trace_ready_releases_only_arrivals_at_or_before_now() {
+        let mut pending = VecDeque::from(vec![
+            direct_request(1, Some(1.0)),
+            direct_request(2, Some(1.1)),
+            direct_request(3, Some(2.0)),
+        ]);
+
+        let (request_1, arrival_1) = pop_next_trace_ready(&mut pending, 1.0).unwrap();
+        assert_eq!(request_1.uuid, Some(Uuid::from_u128(1)));
+        assert_eq!(arrival_1, 1.0);
+
+        assert!(pop_next_trace_ready(&mut pending, 1.0).is_none());
+
+        let (request_2, arrival_2) = pop_next_trace_ready(&mut pending, 1.1).unwrap();
+        assert_eq!(request_2.uuid, Some(Uuid::from_u128(2)));
+        assert_eq!(arrival_2, 1.1);
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn test_pop_next_concurrency_ready_stops_at_max_in_flight() {
+        let mut pending = VecDeque::from(vec![direct_request(1, None), direct_request(2, None)]);
+
+        assert!(pop_next_concurrency_ready(&mut pending, 5.0, 2, 2).is_none());
+
+        let (request, arrival_ms) = pop_next_concurrency_ready(&mut pending, 5.0, 1, 2).unwrap();
+        assert_eq!(request.uuid, Some(Uuid::from_u128(1)));
+        assert_eq!(arrival_ms, 5.0);
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn test_worker_ready_push_pop_round_trip() {
+        let mut events: BinaryHeap<SimulationEvent<()>> = BinaryHeap::new();
+        let mut next_event_seq = 0;
+
+        push_worker_ready(
+            &mut events,
+            &mut next_event_seq,
+            100.0,
+            SimulationWorkerStage::Aggregated,
+            3,
+        );
+
+        // Not ready before the scheduled time.
+        assert!(pop_ready_worker_ready(&mut events, 99.0).is_none());
+
+        let (stage, worker_id) = pop_ready_worker_ready(&mut events, 100.0).unwrap();
+        assert_eq!(stage, SimulationWorkerStage::Aggregated);
+        assert_eq!(worker_id, 3);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_worker_ready_does_not_interfere_with_completion_pop() {
+        let mut events: BinaryHeap<SimulationEvent<()>> = BinaryHeap::new();
+        let mut next_event_seq = 0;
+
+        push_worker_ready(
+            &mut events,
+            &mut next_event_seq,
+            10.0,
+            SimulationWorkerStage::Aggregated,
+            1,
+        );
+
+        // pop_ready_worker_completions must return None (wrong event kind).
+        assert!(pop_ready_worker_completions(&mut events, 10.0).is_none());
+        // The event should still be in the heap.
+        assert_eq!(events.len(), 1);
+        // pop_ready_worker_ready should succeed.
+        assert!(pop_ready_worker_ready(&mut events, 10.0).is_some());
+    }
+
+    #[test]
+    fn same_timestamp_events_follow_semantic_phase_and_identity_order() {
+        let mut events: BinaryHeap<SimulationEvent<()>> = BinaryHeap::new();
+        let mut next_event_seq = 0;
+        push_transfer_complete(
+            &mut events,
+            &mut next_event_seq,
+            10.0,
+            HandoffId::new(Uuid::from_u128(2)),
+        );
+        push_worker_ready(
+            &mut events,
+            &mut next_event_seq,
+            10.0,
+            SimulationWorkerStage::Decode,
+            3,
+        );
+        push_worker_completions(
+            &mut events,
+            &mut next_event_seq,
+            ScheduledEngineCompletion {
+                at_ms: 10.0,
+                completion: EnginePassCompletion::new(SimulationWorkerStage::Decode, 4, PassId(9)),
+            },
+        );
+        push_worker_completions(
+            &mut events,
+            &mut next_event_seq,
+            ScheduledEngineCompletion {
+                at_ms: 10.0,
+                completion: EnginePassCompletion::new(SimulationWorkerStage::Prefill, 2, PassId(3)),
+            },
+        );
+
+        let first = pop_ready_worker_completions(&mut events, 10.0).unwrap();
+        assert_eq!(first.stage, SimulationWorkerStage::Prefill);
+        assert_eq!(first.worker_id, 2);
+        let second = pop_ready_worker_completions(&mut events, 10.0).unwrap();
+        assert_eq!(second.stage, SimulationWorkerStage::Decode);
+        assert_eq!(second.worker_id, 4);
+        assert_eq!(
+            pop_ready_worker_ready(&mut events, 10.0),
+            Some((SimulationWorkerStage::Decode, 3))
+        );
+        assert_eq!(
+            pop_ready_transfer_complete(&mut events, 10.0),
+            Some(HandoffId::new(Uuid::from_u128(2)))
+        );
+    }
+}

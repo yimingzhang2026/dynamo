@@ -463,7 +463,7 @@ def test_saved_offered_requests_are_preferred_and_completions_stay_distinct(
     ]
 
 
-def test_saved_arriving_requests_are_primary_over_legacy_offered_alias(
+def test_saved_arriving_requests_are_primary_over_offered_alias(
     tmp_path: Path,
 ):
     trace = _write_trace(tmp_path, [0, 1_000, 2_000])
@@ -482,30 +482,6 @@ def test_saved_arriving_requests_are_primary_over_legacy_offered_alias(
     assert point["completed_requests"] == 7
     assert scope["arrivals"]["source"] == "saved_arriving_requests"
     assert scope["arrivals"]["points"][0]["count"] == 31
-
-
-def test_completed_requests_become_offered_only_with_explicit_legacy_marker(
-    tmp_path: Path,
-):
-    trace = _write_trace(tmp_path, [0, 1_000])
-    unmarked = _result("unmarked", trace, timeline=_timeline())
-    marked = _result("marked", trace, timeline=_timeline())
-    marked["timeline_semantics"] = "legacy_num_req_as_completed"
-    marked["evaluation"]["trace"]["request_rows"] = 10
-
-    unmarked_data = _scope(build_match_report_data(_report([unmarked])))
-    marked_data = _scope(build_match_report_data(_report([marked])))
-
-    unmarked_point = unmarked_data["results"][0]["timeline"][0]
-    assert unmarked_point["offered_requests"] is None
-    assert unmarked_point["completed_requests"] == 7
-    assert unmarked_data["arrivals"].get("source") is None
-    marked_point = marked_data["results"][0]["timeline"][0]
-    assert marked_point["offered_requests"] == 7
-    assert marked_point["completed_requests"] is None
-    assert marked_data["arrivals"]["source"] == "legacy_marked_offered_requests"
-    assert "mislabeled" in marked_data["arrivals"]["note"]
-    assert "cover 7 of 10 arriving requests" in marked_data["arrivals"]["note"]
 
 
 def test_queue_depth_is_never_inferred_from_role_details(tmp_path: Path):
@@ -1012,3 +988,135 @@ def test_renderer_is_standalone_interactive_scoped_and_script_safe(
         "--no-publish"
     )
     assert attack not in rendered
+
+
+def _synthetic_normalized_rows(
+    count: int, *, queue_spike_at: int
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index in range(count):
+        rows.append(
+            {
+                "time_s": float(index * 5),
+                "window_start_s": float(index * 5),
+                "requested_replicas": 3 if index == 7 else None,
+                "decision_only": False,
+                "total_queued_requests": 40 if index == queue_spike_at else 1,
+                "ttft_ms": 120.0,
+                "tpot_ms": None,  # unavailable lane value
+                "active_replicas": 2,
+                "active_prefill": 0,
+                "active_decode": 2,
+                "provisioned_replicas": 2,
+                "provisioned_prefill": 0,
+                "provisioned_decode": 2,
+                "provisioned_gpus": 2,
+                "router_pending_requests": None,
+                "scheduler_metrics_payload_available": True,  # not a frontend field
+            }
+        )
+    return rows
+
+
+def test_frontend_payload_downsamples_to_a_global_point_budget(monkeypatch) -> None:
+    from autoscaling_arena import html_report
+
+    monkeypatch.setattr(html_report, "_FRONTEND_POINT_BUDGET", 200)
+    monkeypatch.setattr(html_report, "_FRONTEND_MIN_POINTS", 10)
+    results = [
+        {
+            "run_id": f"r{index}",
+            "timeline": _synthetic_normalized_rows(300, queue_spike_at=222),
+            "cache": {
+                "status": "ok",
+                "timeline": [
+                    {"time_s": float(i), "prefix_cache_reused_ratio": 0.1}
+                    for i in range(300)
+                ],
+            },
+        }
+        for index in range(4)
+    ]
+    data = {"scopes": [{"results": results[:2]}, {"results": results[2:]}]}
+
+    payload = _frontend_report_data(data)
+
+    lengths = [
+        len(result["timeline"])
+        for scope in payload["scopes"]
+        for result in scope["results"]
+    ]
+    assert lengths == [50, 50, 50, 50]  # 200 points shared by 4 runs
+    cache_lengths = [
+        len(result["cache"]["timeline"])
+        for scope in payload["scopes"]
+        for result in scope["results"]
+    ]
+    assert cache_lengths == [50, 50, 50, 50]
+    cache = payload["scopes"][0]["results"][0]["cache"]
+    assert cache["status"] == "ok" and cache["timeline"][0]["time_s"] == 0.0
+    assert cache["timeline"][-1]["time_s"] == 299.0
+    first = payload["scopes"][0]["results"][0]["timeline"]
+    # Peak preservation still applies under the tighter cap.
+    assert max(point["total_queued_requests"] for point in first) == 40
+    # The original data is not mutated and the JSON contract keeps every point.
+    assert len(results[0]["timeline"]) == 300
+
+
+def test_frontend_payload_omits_null_fields_and_non_frontend_keys() -> None:
+    data = {
+        "scopes": [
+            {
+                "results": [
+                    {
+                        "run_id": "r",
+                        "timeline": _synthetic_normalized_rows(3, queue_spike_at=1),
+                    }
+                ]
+            }
+        ]
+    }
+
+    point = _frontend_report_data(data)["scopes"][0]["results"][0]["timeline"][0]
+
+    assert point["time_s"] == 0.0
+    assert "tpot_ms" not in point  # null dropped; the page treats missing as null
+    assert "router_pending_requests" not in point
+    assert "scheduler_metrics_payload_available" not in point
+    assert "requested_replicas" not in point  # null on a telemetry-only row
+
+
+def test_small_reports_keep_every_point() -> None:
+    rows = _synthetic_normalized_rows(30, queue_spike_at=3)
+    data = {"scopes": [{"results": [{"run_id": "r", "timeline": rows}]}]}
+
+    payload = _frontend_report_data(data)
+
+    assert len(payload["scopes"][0]["results"][0]["timeline"]) == 30
+
+
+def test_embedded_javascript_uses_null_tolerant_comparisons() -> None:
+    from autoscaling_arena import html_report
+
+    assert "=== null" not in html_report._REPORT_JS
+    assert "!== null" not in html_report._REPORT_JS
+    assert "== null" in html_report._REPORT_JS
+
+
+def test_ranking_metric_leads_the_metric_columns(tmp_path: Path):
+    """The primary metric heads the table even when metrics.include lists it later."""
+    trace = _write_trace(tmp_path, [0, 1_000])
+    report = _report(
+        [_result("planner", trace, rank_by="goodput_per_gpu")],
+        rank_by="goodput_per_gpu",
+    )
+    report["summary"]["metrics"] = ["good_rate", "goodput_per_gpu", "gpu_hours"]
+    data = build_match_report_data(report)
+    assert data["metric_columns"] == ["goodput_per_gpu", "good_rate", "gpu_hours"]
+    # Absent from the list it is still inserted first; present once, never duplicated.
+    report["summary"]["metrics"] = ["good_rate", "gpu_hours"]
+    assert build_match_report_data(report)["metric_columns"] == [
+        "goodput_per_gpu",
+        "good_rate",
+        "gpu_hours",
+    ]

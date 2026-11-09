@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+
+schema_version: 1
+name: planner-vs-baselines-sim
+description: Compare Planner, KEDA, reactive, and fixed-capacity baselines in DynoSim.
+
+backend:
+  type: sim
+  topology: disagg
+  gpu_budget: 32
+
+  model:
+    name: openai/gpt-oss-120b
+    ais_model_path: openai/gpt-oss-120b
+
+  engines:
+    common:
+      system: h200_sxm
+      backend: vllm
+      backend_version: "0.19.0"
+      tp_size: 1
+      moe_tp_size: 1
+      moe_ep_size: 1
+      attention_dp_size: 1
+      runtime:
+        cold_start_delay_s: 60
+      extra_args: {}
+    prefill:
+      runtime:
+        kv_transfer_bandwidth_gbps: 100
+        kv_bytes_per_token: 131072
+    decode: {}
+
+  router:
+    mode: round_robin
+
+  planner_config: ../../configs/planner.sim.example.yaml
+
+  replay:
+    ais_bootstrap: true
+    concurrency: null
+    telemetry_sample_interval_s: 5
+
+  autoscalers:
+    - name: planner
+      type: planner
+      start:
+        prefill: 1
+        decode: 1
+
+    - name: keda-default
+      type: keda
+      start:
+        prefill: 1
+        decode: 1
+      config:
+        poll_interval_s: 15
+        queue_threshold: 5
+        kv_threshold: 0.9
+        min_prefill: 1
+        max_prefill: 16
+        min_decode: 1
+        max_decode: 8
+        tolerance: 0.1
+        scale_up_stabilization_s: 0
+        scale_down_stabilization_s: 300
+
+    - name: reactive-default
+      type: reactive
+      start:
+        prefill: 1
+        decode: 1
+      config:
+        poll_interval_s: 15
+        step: 1
+        prefill_queue_up: 4
+        prefill_queue_down: 1
+        decode_kv_up: 0.8
+        decode_kv_down: 0.3
+        min_prefill: 1
+        max_prefill: 16
+        min_decode: 1
+        max_decode: 8
+
+    - name: static-4p4d
+      type: static
+      config:
+        num_prefill: 4
+        num_decode: 4
+        poll_interval_s: 5
+
+evaluations:
+  workloads: [unit-a, unit-b]
+  defaults:
+    seed: 0
+    max_requests: 20
+
+slo_profiles:
+  - name: interactive
+    ttft_ms: [300, 500]
+    itl_ms: [50, 100]
+
+metrics:
+  rank_by: goodput_per_gpu
+  include:
+    - goodput_per_gpu
+    - goodput_rps
+    - good_rate
+    - gpu_hours
+    - mean_ttft_ms
+    - p99_ttft_ms
+    - mean_itl_ms
+    - oscillation_count
+    - scale_events
+
+execution:
+  repetitions: 1
+  fail_fast: false
+  max_runs: 48
+
+publish:
+  artifact_root: ../runs/match-sim/artifacts
+  destinations:
+    - type: console
+    - type: json
+      path: ../runs/match-sim/results.json
+    - type: html
+      path: ../runs/match-sim/report.html

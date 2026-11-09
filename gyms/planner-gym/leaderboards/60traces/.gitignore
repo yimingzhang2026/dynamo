@@ -1,0 +1,4 @@
+*.png
+
+# Local publication receipts contain the output location.
+publication-validation.json

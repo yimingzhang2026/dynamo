@@ -1,151 +1,125 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Planner Gym
+# Planner Gym: 60-trace benchmark
 
-**Experimental.** Compare LLM inference autoscaling policies with NVIDIA Dynamo's
-CPU replay simulator, or benchmark existing OpenAI-compatible deployments with
-[AIPerf](https://github.com/ai-dynamo/aiperf). The Python package is named
-`autoscaling_arena`.
+This directory contains the replay runners, controllers, KnowLine serving and
+GPU campaign tools, result import, analysis, and offline HTML generation.
+The saved tables contain all 360 results for cloudAI-MPC, Dynamo, KEDA, Reactive,
+Static, and KnowLine-31B on 30 aggregated and 30 disaggregated traces. The shared
+ceiling is **the original Static GPU allocation + 3 × the largest per-worker GPU
+cost**. All planners start at that original fleet;
+Static holds it fixed. Dynamic planners have a minimum of one worker per active
+pool and no independent worker-count cap. Starting and draining workers count
+against the shared ceiling.
 
-Offline matches run Dynamo Planner, a Python KEDA/HPA policy port, reactive
-scaling, or fixed capacity against the same workload, model, engine, hardware
-model, and service-level objectives (SLOs). The leaderboard ranks SLO-qualified
-requests per second per average allocated GPU. It also reports latency, the
-fraction of requests meeting the SLO, GPU-hours, and scaling activity.
+## Rebuild the saved tables
 
-The KEDA entry models controller behavior; it does not deploy Kubernetes or a
-live KEDA controller. Simulation estimates performance and does not replace
-validation on a serving deployment.
+Python 3.11 or 3.12 is sufficient; replay and GPU inference are unnecessary.
+The versioned `leaderboards/60traces/inputs/` contains the complete current scores,
+GPU audits, configurations and reduced diagnostic evidence.
 
-## Start Here
+```bash
+python leaderboards/60traces/build_leaderboards.py
+```
 
-Use the [getting started guide](docs/getting-started.md) to run Planner and KEDA
-against 100 requests from Dynamo's bundled public Mooncake trace. No separate
-trace download or model weights are required.
+To verify the saved HTML, CSV and JSON byte for byte without modifying them:
 
-From `dynamo/gyms/planner-gym` on Linux with Python 3.12, Rust, and Dynamo's
-[source-build prerequisites](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/advanced-customizations/building-from-source.md):
+```bash
+python leaderboards/60traces/build_leaderboards.py --check
+```
+
+See [reproducibility](docs/reproducibility.md) for the input/runtime pins and the
+distinction between rebuilding these results and repeating model inference.
+
+Open [leaderboards/60traces/index.html](leaderboards/60traces/index.html).
+The generator also writes topology tables, latency/SLO matrices, SLO-adjusted
+rankings, JSON, and CSV exports.
+[Report details](leaderboards/60traces/README.md) describe the scoring and inputs.
+
+## Resources
+
+| Work | CPU and RAM | Physical GPUs |
+| --- | --- | --- |
+| Rebuild saved HTML and analysis | 1 CPU, 1 GiB RAM | 0 |
+| Full CPU replay campaign | Example policy: 8 CPU cores, 512 GiB RAM; up to 8 runs on distinct single-core slots, reserving 64 GiB | 0 |
+| One KnowLine decision server | Budget 16 CPU cores; replay RAM remains subject to each trace's reservation | 2 × 80 GiB GPUs for bf16 weights |
+| Parallel GPU campaign | Per node: 64 CPU cores, about 2 TiB RAM; 4 replay/server lanes with 384 GiB replay RSS guards | 8 × 80 GiB GPUs per node |
+
+CPU and memory settings are configurable. The planner checks reservations and
+available capacity before starting work; large jobs run alone when required.
+These are execution profiles, not measured minimum requirements. The GPU
+campaign defaults to two node queues with four concurrent traces per node.
+The longest cases start on separate nodes; smaller cases fill each free lane,
+reusing its loaded model. `--nodes` sets the node count when preparing a campaign.
+Serving GPUs shown in the result tables are simulated allocations. Only the
+KnowLine decision model needs physical GPUs.
+
+## Run the benchmark
+
+On Linux, install the native replay runtime and this package:
 
 ```bash
 bash scripts/setup_simulation_env.sh
 source .venv/bin/activate
-python scripts/run_match_config.py configs/match.quickstart.yaml --validate-only --print-matrix
-python scripts/run_match_config.py configs/match.quickstart.yaml
+python -m pip install -e '.[sim,jev,analysis,test]' numpy
 ```
 
-Open `runs/quickstart/report.html` after the two runs succeed. Full metrics and
-provenance are saved in `runs/quickstart/results.json`; replay diagnostics and
-telemetry are under `runs/quickstart/artifacts/`.
+Both Cargo workspaces use the optimized scheduler in `../../vendor/aisimulate-core`.
+The runner requires `incremental-queue-stats-v1`. Replay streams request results
+to JSONL, skips detailed per-tick planner charts, and retains lifecycle events
+for exact GPU-hour scoring plus sampled telemetry for diagnosis. Full trace
+windows, seeds, request counts, SLOs, and worker limits remain intact.
 
-> [!NOTE]
-> The simulation setup requires Linux because Dynamo's pinned AISimulate wheel
-> is Linux-only. Trace generation, config validation, scoring, saved reports,
-> and endpoint benchmarking also work on macOS. Python 3.11–3.12 is supported
-> for the standalone package; use 3.11 or 3.12 for simulation.
-
-## Choose a Workflow
-
-| Goal | Entry point | Requirements |
-| --- | --- | --- |
-| First offline comparison | [Getting started](docs/getting-started.md) | Linux and a native Dynamo build |
-| Generate seven synthetic workloads | `python scripts/gen_traces.py --seed 0` | Python standard library |
-| Configure a comparison matrix | [Match Config guide](docs/usage.md#user-guide-run-a-match-config) | Gym; Dynamo for sim, AIPerf for real |
-| Run independent configurations with checkpoints | [Reproducible suites](docs/usage.md#reproducible-suites-and-bounded-execution) | Gym; native runtime for simulation |
-| Build six schedule-shaped workloads from your data | [Golden Set builder](docs/usage.md#build-a-golden-set-from-an-external-base-trace) | Gym and a source trace |
-| Replay recorded requests | [Recorded trace guide](docs/usage.md#bring-your-own-recorded-trace) | User-supplied Mooncake or Dynamo request traces |
-| Compare running deployments | [Endpoint benchmarking](docs/usage.md#user-guide-benchmark-live-endpoints) | AIPerf and existing endpoints |
-| Add an autoscaler | [Extension guide](docs/usage.md#add-an-offline-autoscaler) | Dynamo's engine interface |
-| Use the hosted Jev decision engine | [Jev guide](docs/jev.md) | Simulation environment and a TypeSafe API key |
-
-All commands run from `gyms/planner-gym`. Relative paths inside a Match Config
-resolve from the YAML file's directory. The scripts are source-checkout tools;
-the installed wheel provides the Python package.
-
-For tools that do not need simulation, create a separate environment:
+Prepare the inputs using [data/README.md](data/README.md), then:
 
 ```bash
-python3.12 -m venv .venv-tools
-source .venv-tools/bin/activate
-python -m pip install -e '.[test,jev]'
-python scripts/gen_traces.py --seed 0
-python scripts/run_match_config.py configs/match.quickstart.yaml --validate-only
+python scripts/run_campaign.py cpu --workspace runs/benchmark
 ```
 
-The base dependencies are PyYAML, Plotly, and psutil. The `test` and `jev` extras add
-pytest and the optional HTTP client; `sim` adds the Planner's Python dependencies.
-Dynamo's native runtime and AIPerf are installed separately.
+The CPU command prepares and executes all 300 CPU jobs on up to eight cores.
+The same entry point starts all 60 KnowLine cases on two GPU nodes after model
+setup, as described in [docs/comparison-60.md](docs/comparison-60.md). It checks
+native source and binary identity before reusing a runtime. Server replacement,
+memory isolation and allocation continuation are part of the maintained
+scheduler. Completed cases are preserved; no separate recovery script is needed.
 
-## Metrics
+The decision contract is documented in [docs/knowline.md](docs/knowline.md).
 
-A request meets an SLO only when it satisfies every configured threshold.
-Dropped or failed requests count against the good-request rate.
-For simulation, `metrics.short_output_itl` explicitly selects whether one-token
-outputs fail an ITL constraint (`fail`, the default) or skip that check (`skip`,
-matching native replay). Incompatible summary-only scoring fails explicitly.
-Scorecard schema 3 records the policy, measurement interval, and GPU cost basis.
-
-| Metric | Definition |
-| --- | --- |
-| `goodput_rps` | SLO-qualified requests / benchmark seconds |
-| `good_rate` | SLO-qualified requests / attempted requests |
-| `gpu_hours` | Provisioned GPU allocation integrated over replay time by Dynamo |
-| `average_gpus` | `gpu_hours / benchmark_hours` |
-| `goodput_per_gpu` | `goodput_rps / average_gpus` |
-| `oscillation_count` | Scaling direction reversals across worker pools |
-
-Read efficiency together with good-request rate and latency. A policy can rank
-well on efficiency while missing many SLOs. Simulated allocation includes
-starting and draining workers, weighted by GPUs per worker. Live endpoint
-comparisons lack deployment telemetry and therefore cannot rank by GPU cost.
-An optional arrival measurement window includes eventual outcomes during drain
-while integrating GPU allocation over the selected interval. Full-replay latency
-percentiles remain context metrics; they are not relabeled as window percentiles.
-
-| Built-in SLO | Time to First Token (TTFT) | Inter-token Latency (ITL) | End-to-end latency |
-| --- | --- | --- | --- |
-| `interactive` | 300 ms | 50 ms | Unconstrained |
-| `agentic` | Unconstrained | 200 ms | 3,000 ms |
-| `relaxed` | 2,000 ms | 50 ms | Unconstrained |
-
-The [usage guide](docs/usage.md) describes the eight-workload catalog, matrix
-expansion, report timelines, custom SLOs, and trace formats. The
-[replay integration guide](docs/replay-integration.md) describes the boundary
-with Dynamo and the telemetry contract.
-
-## Development
+## Collect and analyze a new campaign
 
 ```bash
-python -m pip install -e '.[test,jev]'
-python -m pytest -q
+python scripts/run_campaign.py collect --kind cpu --workspace runs/benchmark
+python scripts/run_campaign.py collect --kind knowline --workspace runs/benchmark
+python scripts/run_campaign.py publish --collection runs/benchmark/exports
 ```
 
-The standalone CI job runs on Python 3.11 and 3.12 and exercises config
-validation, trace processing, scoring, report rendering, and mocked backend
-contracts. It does not build Dynamo or run the native adapter tests in
-`test_adapter_lifecycle.py`, `test_adapter_observations.py`, or `test_jev.py`;
-these modules are skipped when Dynamo imports are unavailable. After the
-[full setup](#start-here), run the same test command to include them, then run
-the quickstart to verify actual native replay.
+Collect on the machine holding each campaign, then place both export directories
+under one local `exports/` directory before publication. Collection requires
+resident-GPU audits and complete trace measurements. The publisher accepts all
+300 CPU and 60 KnowLine exports and refreshes analysis for their exact hashes.
+Detailed timeline extraction remains available through `extract_diagnostics.py`.
 
-## Limitations
+The local `runs/efficiency-plus3-20261106/` retains the current campaign's 360
+compact exports, transfer manifests and source/runtime identity receipts.
+Large input traces and these local bundles are ignored by Git. Reconstruct
+and verify the current saved tables through the same entry point:
 
-- The online runner targets existing deployments; it does not provision servers
-  or collect their GPU cost or controller telemetry.
-- Synthetic traces are open-loop arrival schedules. They do not model tool
-  delays or completion-dependent conversation turns.
-- Golden Set construction loads its source scope into memory. Bound it with
-  `--max-source-requests` and `--max-source-hashes`, or narrow the input first.
-- The legacy leaderboard scripts overwrite fixed diagnostic filenames. Use
-  Match Configs for isolated session and run artifacts.
-- JSONL request capture avoids a Python request list, but the native runtime
-  still buffers terminal rows before writing them. Summary capture uses less
-  memory; explicit windows require memory or JSONL capture. RSS limits apply
-  to the isolated worker and its descendants.
-- Hosted Jev call latency is measured separately and does not advance simulated
-  time. See its guide before interpreting results.
+```bash
+python scripts/run_campaign.py publish
+```
 
-For setup, data, and endpoint failures, see
-[troubleshooting](docs/usage.md#troubleshooting).
+The versioned compact `inputs/` remain sufficient to rebuild HTML after a fresh
+checkout. The expanded traces can be regenerated from `reproduction/` when a new
+replay is required.
+
+## Validate
+
+```bash
+python -m pytest -q tests leaderboards/60traces
+```
+
+Browser checks use `leaderboards/60traces/check_browser.mjs` with a local
+Chrome DevTools endpoint supplied through `CHROME_ENDPOINT`.

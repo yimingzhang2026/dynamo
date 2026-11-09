@@ -167,7 +167,7 @@ def _sim_config(
         backend=backend,
         evaluations=(
             EvaluationConfig(
-                workload="flat",
+                workload="unit-a",
                 seed=17,
                 max_requests=5,
                 arrival_speedup=2.0,
@@ -289,7 +289,10 @@ def _write_cli_sim_config(
                     num_prefill: 1
                     num_decode: 1
             evaluations:
-              workloads: [flat]
+              traces:
+                - name: cli-input
+                  path: unit-trace.jsonl
+                  block_size: 512
             slo_profiles:
               - name: interactive
                 ttft_ms: 300
@@ -309,6 +312,9 @@ def _write_cli_sim_config(
             "    ",
         )
         + "\n"
+    )
+    (tmp_path / "unit-trace.jsonl").write_text(
+        '{"timestamp":0,"input_length":512,"output_length":8,"hash_ids":[1]}\n'
     )
     return config_path
 
@@ -421,7 +427,7 @@ def test_validate_only_does_not_import_runtime_backends_or_create_artifacts(
 
     assert proc.returncode == 0, proc.stderr
     assert "Valid Match Config: 'validate-only-unit'" in proc.stdout
-    assert "0001-sim-fixed-flat-interactive-r0-s0" in proc.stdout
+    assert "0001-sim-fixed-cli-input-interactive-r0-s0" in proc.stdout
     assert not (tmp_path / "artifacts").exists()
 
 
@@ -1055,7 +1061,7 @@ def test_console_ranking_orders_best_first_and_missing_or_failed_last(
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
             "autoscaler": autoscaler,
-            "workload": "flat",
+            "workload": "unit-a",
             "sla": "interactive",
             "repetition": 0,
             "status": status,
@@ -1089,7 +1095,7 @@ def test_console_ranking_orders_best_first_and_missing_or_failed_last(
         output.index(name) for name in ("best", "second", "missing", "crashed")
     ]
     assert positions == sorted(positions)
-    assert "flat | interactive | repetition 0" in output
+    assert "unit-a | interactive | repetition 0" in output
     assert "crashed              FAILED MockFailure: boom" in output
 
 
@@ -1425,10 +1431,10 @@ def test_publisher_refuses_existing_html_without_overwrite(tmp_path: Path):
 
 @pytest.mark.timeout(30)
 def test_generated_replay_command_validates_from_documented_gym_directory():
-    config = load_match_config(ARENA_ROOT / "configs/match.quickstart.yaml")
+    config = load_match_config(ARENA_ROOT / "tests/fixtures/match.quickstart.yaml")
     run = next(config.iter_runs())
     config_reference = match_runner._safe_replay_config_path(config)
-    assert config_reference == "configs/match.quickstart.yaml"
+    assert config_reference == "tests/fixtures/match.quickstart.yaml"
     report = {
         "provenance": {
             "replay_config_sha256": match_runner.match_replay_sha256(config),
@@ -1449,3 +1455,158 @@ def test_generated_replay_command_validates_from_documented_gym_directory():
     )
     assert result.returncode == 0, result.stderr
     assert "Valid Match Config" in result.stdout
+
+
+def test_merge_match_reports_replaces_matching_cells_and_keeps_the_rest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = _sim_config(tmp_path)
+    matrix = list(config.iter_runs())
+    rerun = matrix[1]
+    monkeypatch.setattr(match_runner, "_git_commit", lambda: None)
+
+    def first_pass(config: MatchConfig, item: MatchRun, context) -> dict[str, Any]:
+        del config, context
+        return _ok_result(item, goodput_rps=1.0)
+
+    monkeypatch.setattr(match_runner, "_run_sim_item", first_pass)
+    base = match_runner.execute_match_config(config)
+
+    def second_pass(config: MatchConfig, item: MatchRun, context) -> dict[str, Any]:
+        del config
+        result = _ok_result(item, goodput_rps=9.0)
+        result["artifacts"] = {
+            "directory": str(context.session_root / "runs" / item.run_id)
+        }
+        return result
+
+    monkeypatch.setattr(match_runner, "_run_sim_item", second_pass)
+    update = match_runner.execute_match_config(config, run_ids={rerun.run_id})
+    assert update["results"][0]["artifacts"]["directory"].startswith(
+        "<artifact-session>/"
+    )
+
+    merged = match_runner.merge_match_reports(base, update)
+
+    assert [row["run_id"] for row in merged["results"]] == [
+        item.run_id for item in matrix
+    ]
+    by_id = {row["run_id"]: row for row in merged["results"]}
+    assert by_id[rerun.run_id]["metrics"]["goodput_rps"] == 9.0
+    for item in matrix:
+        if item.run_id != rerun.run_id:
+            assert by_id[item.run_id]["metrics"]["goodput_rps"] == 1.0
+    assert by_id[rerun.run_id]["artifacts"]["directory"] == (
+        f"<artifact-root>/{update['provenance']['session_id']}/runs/{rerun.run_id}"
+    )
+    assert merged["summary"]["planned_runs"] == len(matrix)
+    assert merged["summary"]["executed_runs"] == len(matrix)
+    assert merged["summary"]["succeeded_runs"] == len(matrix)
+    assert merged["summary"]["failed_runs"] == 0
+    assert merged["summary"]["status"] == "ok"
+    assert merged["matrix"] == base["matrix"]
+    sessions = merged["provenance"]["merged_sessions"]
+    assert [entry["session_id"] for entry in sessions] == [
+        base["provenance"]["session_id"],
+        update["provenance"]["session_id"],
+    ]
+    assert sessions[-1]["replaced_run_ids"] == [rerun.run_id]
+    assert sessions[-1]["added_run_ids"] == []
+    assert merged["provenance"]["finished_at"] == update["provenance"]["finished_at"]
+    # Base results are untouched inputs; the merge must not mutate them.
+    assert base["results"][1]["metrics"]["goodput_rps"] == 1.0
+
+    # A second merge appends its session instead of restarting the history.
+    again = match_runner.merge_match_reports(merged, update)
+    assert len(again["provenance"]["merged_sessions"]) == 3
+
+    with pytest.raises(ValueError, match="cannot merge"):
+        match_runner.merge_match_reports(
+            base, {**update, "match": {**update["match"], "backend": "real"}}
+        )
+
+
+def test_cli_autoscaler_selector_and_merge_preconditions(tmp_path: Path):
+    config_path = _write_cli_sim_config(
+        tmp_path,
+        name="autoscaler-select-unit",
+        destinations="""
+        - type: console
+        """,
+    )
+
+    proc = _run_guarded_cli(
+        tmp_path, config_path, "--validate-only", "--autoscaler", "fixed"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "1 sim run selected" in proc.stdout
+
+    proc = _run_guarded_cli(
+        tmp_path, config_path, "--validate-only", "--autoscaler", "nope"
+    )
+    assert proc.returncode == 2
+    assert "unknown --autoscaler: nope; known: fixed" in proc.stderr
+    assert "CLI imported runtime module" not in proc.stderr
+
+    proc = _run_guarded_cli(tmp_path, config_path, "--validate-only", "--merge")
+    assert proc.returncode == 2
+    assert "--merge needs a JSON publish destination" in proc.stderr
+
+    json_config = _write_cli_sim_config(
+        tmp_path,
+        name="merge-precondition-unit",
+        destinations="""
+        - type: json
+          path: results.json
+        """,
+    )
+    proc = _run_guarded_cli(tmp_path, json_config, "--validate-only", "--merge")
+    assert proc.returncode == 2
+    assert "needs existing published results" in proc.stderr
+    assert "run without --merge first" in proc.stderr
+    assert not (tmp_path / "artifacts").exists()
+
+
+def test_merge_match_reports_matches_identity_and_renumbers_to_current_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(match_runner, "_git_commit", lambda: None)
+
+    def run(config: MatchConfig, item: MatchRun, context) -> dict[str, Any]:
+        del config, context
+        return _ok_result(item, goodput_rps=float(item.index))
+
+    monkeypatch.setattr(match_runner, "_run_sim_item", run)
+    base_config = _sim_config(tmp_path, autoscalers=("static-a", "static-b"))
+    base = match_runner.execute_match_config(base_config)
+
+    # The config grows by one autoscaler: every later cell's run id shifts.
+    grown = _sim_config(tmp_path, autoscalers=("static-a", "static-new", "static-b"))
+    grown_matrix = list(grown.iter_runs())
+    new_ids = {item.run_id for item in grown_matrix if item.autoscaler == "static-new"}
+    update = match_runner.execute_match_config(grown, run_ids=new_ids)
+
+    merged = match_runner.merge_match_reports(
+        base, update, matrix=[match_runner._matrix_dict(item) for item in grown_matrix]
+    )
+
+    assert [row["run_id"] for row in merged["matrix"]] == [
+        item.run_id for item in grown_matrix
+    ]
+    assert [row["run_id"] for row in merged["results"]] == [
+        item.run_id for item in grown_matrix
+    ]
+    by_id = {row["run_id"]: row for row in merged["results"]}
+    for item in grown_matrix:
+        if item.autoscaler != "static-new":
+            # Old rows kept their metrics but were renumbered to the new matrix.
+            assert by_id[item.run_id]["autoscaler"] == item.autoscaler
+    assert merged["summary"]["planned_runs"] == len(grown_matrix)
+    assert merged["summary"]["executed_runs"] == len(grown_matrix)
+    assert merged["summary"]["status"] == "ok"
+    latest = merged["provenance"]["merged_sessions"][-1]
+    assert sorted(latest["added_run_ids"]) == sorted(new_ids)
+    assert latest["replaced_run_ids"] == []
+    assert latest["renumbered_run_ids"]  # at least the shifted static-b rows

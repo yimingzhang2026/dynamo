@@ -14,7 +14,8 @@
 # limitations under the License.
 
 default_install_hook_types: [pre-commit, commit-msg]
-exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/trtllm/proto/openengine/v1/.*\.proto$)
+# The vendored crate and content-addressed trace programs retain their pinned bytes.
+exclude: ^(src/grpc_generated|.*\.patch$|.*/connect/.*\.py|components/src/dynamo/planner/plugins/proto/v1/plugin_pb2(_grpc)?\.pyi?$|lib/sidecar/trtllm/proto/openengine/v1/.*\.proto$|vendor/aisimulate-core/|gyms/planner-gym/reproduction/scripts/frozen_(converters|scalers)/)
 repos:
 - repo: https://github.com/timothycrosley/isort
   rev: 5.12.0

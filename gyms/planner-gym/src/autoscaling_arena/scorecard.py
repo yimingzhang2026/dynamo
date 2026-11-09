@@ -72,8 +72,8 @@ def request_itl_ms(rec: dict[str, Any]) -> Optional[float]:
     the request emitted < 2 tokens (ITL undefined → request cannot satisfy an ITL
     constraint), mirroring AIPerf's NoMetricValue.
 
-    Falls back to ``(e2e - ttft) / (output_length - 1)`` for legacy records
-    lacking the field. Canonical replay records distinguish actual
+    Without that field, compute ``(e2e - ttft) / (output_length - 1)``.
+    Replay records distinguish actual
     ``output_length`` from ``requested_output_length``; always use the former.
     """
     if "itl_ms" in rec:
@@ -319,6 +319,16 @@ def scorecard(
             if measurement_window
             else "native_replay",
             "allow_idle_tail": bool(measurement_window and allocation.allow_idle_tail),
+            "idle_tail_policy": (
+                "fixed"
+                if allocation and allocation.allow_idle_tail
+                else measurement_window.idle_tail_policy
+                if measurement_window
+                else "reject"
+            ),
+            "idle_tail_s": max(0.0, measurement_window.end_s - replay_duration_s)
+            if measurement_window
+            else 0.0,
         },
         "completed_requests": completed,
         "attempted_requests": attempted,

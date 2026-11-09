@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -34,8 +35,10 @@ from autoscaling_arena.match_config import (
     SimAutoscalerConfig,
     SimBackendConfig,
     SLAProfileConfig,
+    feasible_worker_targets,
 )
 from autoscaling_arena.measurement import AllocationConfig, MeasurementWindow
+from autoscaling_arena.policy_contracts import POLICY_CONTRACTS
 from autoscaling_arena.scorecard import SLOProfile
 from autoscaling_arena.trace_preparation import TracePreparationConfig, prepare_trace
 from autoscaling_arena.workloads import Workload, get_workload
@@ -326,6 +329,7 @@ def _execute_match_matrix(
                 "config_path": _safe_replay_config_path(config),
             },
             "arena_version": __version__,
+            "packages": _package_versions(),
             "git_commit": _git_commit(),
             "python_version": platform.python_version(),
             "started_at": started_wall.isoformat(),
@@ -339,6 +343,222 @@ def _execute_match_matrix(
         "results": results,
     }
     return _sanitize_json(_redact_report_paths(report, config, context))
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _sequence(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _result_identity_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        row.get("backend"),
+        row.get("autoscaler"),
+        row.get("workload"),
+        row.get("sla"),
+        row.get("repetition"),
+        row.get("seed"),
+    )
+
+
+def merge_match_reports(
+    base: Mapping[str, Any],
+    update: Mapping[str, Any],
+    *,
+    matrix: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Fold a partial rerun into a previously published normalized report.
+
+    Results are matched on their identity (backend, autoscaler, workload, SLA,
+    repetition, seed), not on ``run_id``: run ids carry a matrix position that
+    shifts whenever an autoscaler or workload is added to the config. Every
+    result in ``update`` replaces the ``base`` result with the same identity;
+    identities that only exist in ``update`` are appended. Everything else in
+    ``base`` is kept verbatim, so a rerun of one autoscaler does not cost a
+    rerun of the others.
+
+    ``matrix`` is the *current* config's full expanded matrix (as returned by
+    ``format_match_matrix``'s source, ``config.iter_runs()``, in dict form).
+    When given, merged results and matrix rows are renumbered to it so
+    ``--run-id`` reproduction keeps working after the config changed; base rows
+    whose identity is no longer in the config are kept (with their old matrix
+    rows) rather than silently dropped. Without ``matrix`` the base matrix is
+    extended with the update's rows.
+
+    Both reports redact their own artifact session as ``<artifact-session>``.
+    Because the merge spans two sessions, that placeholder is rewritten to
+    ``<artifact-root>/<session-id>`` on every result so each row still points
+    at its real artifact directory.
+    """
+
+    base_backend = _mapping(base.get("match")).get("backend")
+    update_backend = _mapping(update.get("match")).get("backend")
+    if base_backend != update_backend:
+        raise ValueError(
+            f"cannot merge a {update_backend!r} report into a {base_backend!r} report"
+        )
+    base_provenance = dict(_mapping(base.get("provenance")))
+    update_provenance = _mapping(update.get("provenance"))
+
+    def qualify(
+        results: Sequence[Mapping[str, Any]], session_id: Any
+    ) -> list[dict[str, Any]]:
+        session = f"<artifact-root>/{session_id}" if session_id else "<artifact-root>"
+
+        def rewrite(value: Any) -> Any:
+            if isinstance(value, str):
+                return value.replace("<artifact-session>", session)
+            if isinstance(value, dict):
+                return {key: rewrite(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [rewrite(item) for item in value]
+            return value
+
+        return [rewrite(dict(result)) for result in results]
+
+    merged: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for result in qualify(
+        _sequence(base.get("results")), base_provenance.get("session_id")
+    ):
+        merged[_result_identity_key(result)] = result
+    replaced: list[str] = []
+    added: list[str] = []
+    for result in qualify(
+        _sequence(update.get("results")), update_provenance.get("session_id")
+    ):
+        key = _result_identity_key(result)
+        (replaced if key in merged else added).append(str(result["run_id"]))
+        merged[key] = result
+
+    # Matrix: the current config's full matrix when supplied, else base ∪ update.
+    if matrix is not None:
+        rows = [dict(row) for row in matrix]
+    else:
+        rows = [dict(row) for row in _sequence(base.get("matrix"))]
+        known = {_result_identity_key(row) for row in rows}
+        for row in _sequence(update.get("matrix")):
+            if _result_identity_key(row) not in known:
+                rows.append(dict(row))
+                known.add(_result_identity_key(row))
+    row_by_key = {_result_identity_key(row): row for row in rows}
+    # Keep base rows for identities the current config no longer expands.
+    stale_rows = [
+        dict(row)
+        for row in _sequence(base.get("matrix"))
+        if _result_identity_key(row) not in row_by_key
+    ]
+    for row in stale_rows:
+        row_by_key[_result_identity_key(row)] = row
+    rows = rows + stale_rows
+    order = {_result_identity_key(row): index for index, row in enumerate(rows)}
+
+    renumbered: list[str] = []
+    results: list[dict[str, Any]] = []
+    for key, result in merged.items():
+        row = row_by_key.get(key)
+        if row is not None and row.get("run_id") != result.get("run_id"):
+            # Only the id changes; ``artifacts`` keep naming the on-disk run
+            # directory, which was created under the old id.
+            renumbered.append(f"{result.get('run_id')} -> {row.get('run_id')}")
+            result = {**result, "run_id": row["run_id"]}
+        results.append(result)
+    results.sort(key=lambda result: order.get(_result_identity_key(result), len(order)))
+
+    failed = sum(result.get("status") != "ok" for result in results)
+    skipped = len(rows) - len(results)
+    base_summary = dict(_mapping(base.get("summary")))
+    update_summary = _mapping(update.get("summary"))
+    summary = {
+        **base_summary,
+        "status": "ok" if failed == 0 and skipped <= 0 else "failed",
+        "planned_runs": len(rows),
+        "executed_runs": len(results),
+        "succeeded_runs": len(results) - failed,
+        "failed_runs": failed,
+        "skipped_runs": max(skipped, 0),
+        "rank_by": update_summary.get("rank_by", base_summary.get("rank_by")),
+        "metrics": list(update_summary.get("metrics", base_summary.get("metrics", []))),
+    }
+
+    merged_sessions = list(base_provenance.get("merged_sessions") or [])
+    if not merged_sessions:
+        merged_sessions.append(
+            {
+                "session_id": base_provenance.get("session_id"),
+                "config_sha256": base_provenance.get("config_sha256"),
+                "finished_at": base_provenance.get("finished_at"),
+                "run_ids": sorted(
+                    str(result["run_id"]) for result in _sequence(base.get("results"))
+                ),
+            }
+        )
+    merged_sessions.append(
+        {
+            "session_id": update_provenance.get("session_id"),
+            "config_sha256": update_provenance.get("config_sha256"),
+            "finished_at": update_provenance.get("finished_at"),
+            "run_ids": sorted(replaced + added),
+            "replaced_run_ids": sorted(replaced),
+            "added_run_ids": sorted(added),
+            "renumbered_run_ids": sorted(renumbered),
+        }
+    )
+    provenance = {
+        **base_provenance,
+        "finished_at": update_provenance.get(
+            "finished_at", base_provenance.get("finished_at")
+        ),
+        "duration_s": (
+            _number_or_zero(base_provenance.get("duration_s"))
+            + _number_or_zero(update_provenance.get("duration_s"))
+        ),
+        "artifact_root": "<artifact-root>",
+        "merged_sessions": merged_sessions,
+    }
+    if update_provenance.get("config_sha256") != base_provenance.get("config_sha256"):
+        provenance["config_sha256_latest"] = update_provenance.get("config_sha256")
+
+    return {
+        **{key: value for key, value in base.items()},
+        "match": dict(_mapping(update.get("match")) or _mapping(base.get("match"))),
+        "summary": summary,
+        "provenance": provenance,
+        "resolved_config": dict(
+            _mapping(update.get("resolved_config"))
+            or _mapping(base.get("resolved_config"))
+        ),
+        "matrix": rows,
+        "results": results,
+    }
+
+
+def _number_or_zero(value: Any) -> float:
+    return (
+        float(value)
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        else 0.0
+    )
+
+
+def load_published_report(path: Path) -> dict[str, Any]:
+    """Load a previously published normalized JSON report."""
+
+    try:
+        data = json.loads(Path(path).read_text())
+    except OSError as exc:
+        raise MatchPublishError(f"cannot read published results {path}: {exc}") from exc
+    except ValueError as exc:
+        raise MatchPublishError(
+            f"published results are not valid JSON: {path}: {exc}"
+        ) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise MatchPublishError(
+            f"published results are not a normalized Match Config report: {path}"
+        )
+    return data
 
 
 def _run_one_item(
@@ -419,6 +639,18 @@ def execution_signature(config: MatchConfig) -> dict[str, Any]:
         except OSError as exc:
             raise ValueError(_redact_exception_message(config, str(exc))) from exc
         inputs.append({"sha256": digest.hexdigest()})
+    versions = _package_versions()
+    return {
+        "config_sha256": hashlib.sha256(
+            json.dumps(payload, sort_keys=True, allow_nan=False).encode()
+        ).hexdigest(),
+        "inputs": inputs,
+        "versions": versions,
+        "git_commit": _git_commit(),
+    }
+
+
+def _package_versions() -> dict:
     versions = {}
     for package in (
         "autoscaling-arena",
@@ -430,14 +662,7 @@ def execution_signature(config: MatchConfig) -> dict[str, Any]:
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             versions[package] = None
-    return {
-        "config_sha256": hashlib.sha256(
-            json.dumps(payload, sort_keys=True, allow_nan=False).encode()
-        ).hexdigest(),
-        "inputs": inputs,
-        "versions": versions,
-        "git_commit": _git_commit(),
-    }
+    return versions
 
 
 def publish_match_results(
@@ -527,8 +752,7 @@ def publish_match_results(
             temporary_path = item["temporary"]
             if path.is_symlink():
                 raise MatchPublishError(
-                    f"{item['type'].upper()} destination became a symbolic "
-                    f"link: {path}"
+                    f"{item['type'].upper()} destination became a symbolic link: {path}"
                 )
             if item["overwrite"]:
                 existed = path.exists()
@@ -708,8 +932,7 @@ def format_match_matrix(config: MatchConfig) -> str:
     """Render the expanded plan without importing either runtime backend."""
 
     lines = [
-        f"Match {config.name!r}: {config.expected_runs} runs "
-        f"({config.backend.type})"
+        f"Match {config.name!r}: {config.expected_runs} runs ({config.backend.type})"
     ]
     for item in config.iter_runs():
         lines.append(
@@ -791,7 +1014,11 @@ def _run_sim_item(
             "decision_log": run_dir / "jev-decisions.jsonl",
             "jev_context": {
                 "slo": asdict(profile),
+                "short_output_itl": config.metrics.short_output_itl,
                 "gpu_budget": backend.gpu_budget,
+                "worker_limits": (
+                    asdict(backend.worker_limits) if backend.worker_limits else None
+                ),
                 "engines": {
                     role: {
                         "gpus_per_worker": engine.num_gpus,
@@ -802,9 +1029,18 @@ def _run_sim_item(
                 },
             },
         }
+    if autoscaler.type == "mpc":
+        factory_options = {
+            "feasible_targets": feasible_worker_targets(backend, autoscaler),
+            "short_output_itl": config.metrics.short_output_itl,
+        }
     factory = _build_sim_factory(
         autoscaler, topology=backend.topology, **factory_options
     )
+    if backend.worker_limits is not None:
+        factory = _limit_sim_factory(
+            factory, backend, autoscaler, run_dir / "worker-limit-decisions.jsonl"
+        )
     performance_model_metadata = _sim_performance_model_metadata(backend)
     replay_args: dict[str, Any] = {
         **replay_trace_args,
@@ -920,6 +1156,7 @@ def _run_sim_item(
             "engines": _sim_engines_metadata(backend),
             "topology": backend.topology,
             "router_mode": backend.router.mode,
+            "gpu_budget": backend.gpu_budget,
             "replay": {
                 "request_capture": backend.replay.request_capture,
                 "telemetry_sample_interval_s": (
@@ -935,7 +1172,15 @@ def _run_sim_item(
             },
             "planner_config": _redact_mapping_secrets(planner_config),
             "initial_replicas": asdict(autoscaler.start),
+            "worker_limits": (
+                asdict(backend.worker_limits) if backend.worker_limits else None
+            ),
             "autoscaler_config": _redact_mapping_secrets(dict(autoscaler.config)),
+            "policy_contract": POLICY_CONTRACTS.get(
+                "knowline"
+                if autoscaler.config.get("provider") == "self_hosted"
+                else autoscaler.type
+            ),
         },
         "artifacts": {
             "directory": str(run_dir),
@@ -962,6 +1207,10 @@ def _run_sim_item(
         },
     }
     result["execution"] = {"setup_wall_s": setup_wall_s, "replay_wall_s": replay_wall_s}
+    if backend.worker_limits is not None:
+        result["artifacts"]["worker_limit_decisions"] = str(
+            run_dir / "worker-limit-decisions.jsonl"
+        )
     if preparation is not None:
         result["evaluation"]["preparation"] = dict(preparation.manifest)
         result["artifacts"]["preparation_manifest"] = str(preparation.manifest_path)
@@ -1475,12 +1724,32 @@ def _sim_performance_model_metadata(
     return metadata
 
 
+def _limit_sim_factory(factory, backend, autoscaler, log_path):
+    # Optional Dynamo types stay on the native simulation path.
+    from autoscaling_arena.adapters.limited import LimitedEngine
+
+    targets = feasible_worker_targets(backend, autoscaler)
+    log_path.touch(exist_ok=False)
+
+    def limited_factory(config, capabilities):
+        return LimitedEngine(
+            factory(config, capabilities),
+            targets=targets,
+            start=(autoscaler.start.prefill, autoscaler.start.decode),
+            log_path=log_path,
+        )
+
+    return limited_factory
+
+
 def _build_sim_factory(
     autoscaler: SimAutoscalerConfig,
     *,
     topology: str,
     decision_log: Path | None = None,
     jev_context: dict[str, Any] | None = None,
+    feasible_targets: tuple[tuple[int, int], ...] | None = None,
+    short_output_itl: str = "skip",
 ) -> Callable[[Any, Any], Any]:
     # Imports stay inside the sim path so a real-only install needs no Dynamo.
     if autoscaler.type == "planner":
@@ -1528,6 +1797,37 @@ def _build_sim_factory(
             del config
             return ReactiveAutoscaler(
                 mode=topology, capabilities=capabilities, **parameters
+            )
+
+        return factory
+    if autoscaler.type == "mpc":
+        from autoscaling_arena.adapters import mpc as mpc_module
+
+        capacity_spec = dict(parameters.pop("forward_model"))
+        capacity_type = capacity_spec.pop("type")
+
+        def factory(config, capabilities):
+            del config
+            decode_caps = getattr(capabilities, "decode", None)
+            caps_kwargs = {
+                "max_kv_tokens": getattr(decode_caps, "max_kv_tokens", None),
+                "max_num_seqs": getattr(decode_caps, "max_num_seqs", None),
+            }
+            if capacity_type == "ais":
+                capacity_model = mpc_module.AISCapacityModel(
+                    config=capacity_spec["config"],
+                    decode_config=capacity_spec["decode_config"],
+                    **caps_kwargs,
+                )
+            else:
+                capacity_model = mpc_module.RooflineCapacityModel(**caps_kwargs)
+            return mpc_module.MPCAutoscaler(
+                capacity_model=capacity_model,
+                mode=topology,
+                capabilities=capabilities,
+                feasible_targets=feasible_targets,
+                short_output_itl=short_output_itl,
+                **parameters,
             )
 
         return factory

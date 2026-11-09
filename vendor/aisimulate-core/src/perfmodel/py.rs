@@ -1,0 +1,3028 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// Includes changes adapted from:
+// https://github.com/ai-dynamo/aiconfigurator/blob/6290c161a354da5250c391bd43372b2e9c6f4a51/aic-core/rust/aiconfigurator-core/src/py.rs
+
+//! PyO3 bindings for the compiled-engine core.
+//!
+//! Exposes two call directions over a single PyO3 dependency:
+//!
+//! * **Python → Rust (hot path).** [`AicEngine`] is a `#[pyclass]` wrapping the
+//!   [`Engine`]. Its `#[pymethods]` (`from_spec`, `run_static`,
+//!   `predict_prefill_latency`, `predict_decode_latency`,
+//!   `predict_decode_latency_total`, `mixed_step_latency`,
+//!   `decode_step_latency`) are the surface the Python sweep / Mocker bridge
+//!   calls per point. The agg sweep is orchestrated in Python; there is no
+//!   Rust `run_agg`. Each method
+//!   releases the GIL around the Rust compute via [`Python::allow_threads`],
+//!   so the Rust compute runs without holding the GIL.
+//! * **Rust → Python → Rust (embedded path).** [`AicEngineBuilder`] is the
+//!   Rust entry point. It crosses into Python once to run
+//!   `aisimulate_core.sdk.engine.compile_engine`, then build an [`Engine`]
+//!   from the returned bincode bytes. After that the `predict_*` hot path is
+//!   pure Rust with no GIL.
+//!
+//! Two error conversions live inline here (NOT in `common/error.rs`, which must
+//! stay free of the pyo3 dependency):
+//! * `AicError → PyErr` (`aic_to_py`) for the `#[pymethods]` boundary.
+//! * `PyErr → AicError` (inline in [`compile_engine_from_request`]) for the
+//!   embedded path.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::sync::GILOnceCell;
+use pyo3::types::PyType;
+
+use crate::common::error::AicError;
+use crate::perfmodel::EngineConfig;
+use crate::perfmodel::engine::runtime::{
+    DEFAULT_STATIC_STRIDE, Engine, PerOpSolValue, PerOpValue, PerOpValueWithMetadata,
+    RuntimeConfig, StaticMode, StaticResult,
+};
+use crate::{BackendKind, DataType, DatabaseMode, ENGINE_CONFIG_SCHEMA_VERSION};
+
+/// Trivial smoke export: returns the engine-config schema version so callers
+/// can confirm the extension built and imported correctly.
+#[pyfunction]
+fn _build_smoke() -> u32 {
+    ENGINE_CONFIG_SCHEMA_VERSION
+}
+
+/// Cached handles to the canonical SDK exception classes
+/// (`aisimulate_core.sdk.errors` — the CORE namespace: the standalone
+/// compatibility namespace bundled in the `aisimulate` wheel). Filled lazily
+/// on first use so importing the
+/// extension never imports the sdk (the sdk imports aisimulate_core — an
+/// eager import here would be a cycle), and left empty in pure-Rust contexts
+/// where the sdk is not installed (fallback to `PyValueError`).
+static PERF_DATA_NOT_AVAILABLE_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static EMPIRICAL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static MISSING_SYSTEM_FLOPS_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static SOL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+
+/// Resolve (and memoize) one sdk error class; `None` when the sdk is not
+/// importable, so the caller falls back to `PyValueError`.
+fn sdk_error_type(
+    py: Python<'_>,
+    cell: &'static GILOnceCell<Py<PyType>>,
+    name: &str,
+) -> Option<Py<PyType>> {
+    cell.get_or_try_init(py, || -> PyResult<Py<PyType>> {
+        Ok(py
+            .import("aisimulate_core.sdk.errors")?
+            .getattr(name)?
+            .downcast_into::<PyType>()?
+            .unbind())
+    })
+    .ok()
+    .map(|ty| ty.clone_ref(py))
+}
+
+/// Convert a crate error into a Python exception at the `#[pymethods]` boundary.
+/// Inline (not a `From` impl in `error.rs`) so the error module stays pyo3-free.
+///
+/// Typed mapping so Python-side classifiers keep working across the FFI:
+/// * missing-perf-data errors (`AicError::PerfDatabase` / `Io` — the
+///   `is_missing_perf_data` set) raise the canonical
+///   `aisimulate_core.sdk.errors.PerfDataNotAvailableError`, so
+///   `perf_database.has_perf_data_not_available_cause` recognizes rust-path
+///   data misses;
+/// * `AicError::EmpiricalNotImplemented` raises
+///   `aisimulate_core.sdk.errors.EmpiricalNotImplementedError` (the typed
+///   HYBRID/EMPIRICAL coverage miss);
+/// * `AicError::MissingSystemFlops` raises
+///   `aisimulate_core.sdk.errors.MissingSystemFlopsError` (strict per-dtype
+///   `*_tc_flops` resolution — a `ValueError` subclass on the Python side);
+/// * `AicError::SolNotImplemented` raises
+///   `aisimulate_core.sdk.errors.SolNotImplementedError` (the analytic SOL
+///   path has no implementation for a required operator);
+/// * everything else stays `PyValueError`.
+///
+/// The sdk import is lazy and failure-tolerant: in pure-Rust test contexts
+/// (cargo test without the sdk on `sys.path`) the conversion degrades to
+/// `PyValueError` with the same message.
+pub(crate) fn aic_to_py(e: AicError) -> PyErr {
+    let sdk_class: Option<(&'static GILOnceCell<Py<PyType>>, &str)> = if e.is_missing_perf_data() {
+        Some((&PERF_DATA_NOT_AVAILABLE_ERROR, "PerfDataNotAvailableError"))
+    } else if matches!(e, AicError::EmpiricalNotImplemented(_)) {
+        Some((
+            &EMPIRICAL_NOT_IMPLEMENTED_ERROR,
+            "EmpiricalNotImplementedError",
+        ))
+    } else if matches!(e, AicError::MissingSystemFlops(_)) {
+        Some((&MISSING_SYSTEM_FLOPS_ERROR, "MissingSystemFlopsError"))
+    } else if matches!(e, AicError::SolNotImplemented(_)) {
+        Some((&SOL_NOT_IMPLEMENTED_ERROR, "SolNotImplementedError"))
+    } else {
+        None
+    };
+    let message = e.to_string();
+    if let Some((cell, name)) = sdk_class {
+        // `with_gil` is re-entrant, so this is safe whether the caller holds
+        // the GIL (from_spec) or just re-acquired it (post-allow_threads).
+        let typed = Python::with_gil(|py| {
+            sdk_error_type(py, cell, name)
+                .map(|ty| PyErr::from_type(ty.into_bound(py), message.clone()))
+        });
+        if let Some(err) = typed {
+            return err;
+        }
+    }
+    PyValueError::new_err(message)
+}
+
+/// Map the `mode` string (Python's `_run_static_breakdown` convention) to the
+/// Rust [`StaticMode`]. `"static" → Both`, `"static_ctx" → Context`,
+/// `"static_gen" → Generation`; anything else is a `ValueError`.
+pub(crate) fn parse_mode(mode: &str) -> PyResult<StaticMode> {
+    match mode {
+        "static" => Ok(StaticMode::Both),
+        "static_ctx" => Ok(StaticMode::Context),
+        "static_gen" => Ok(StaticMode::Generation),
+        other => Err(PyValueError::new_err(format!(
+            "invalid mode {other:?}; expected one of \"static\", \"static_ctx\", \"static_gen\""
+        ))),
+    }
+}
+
+/// Discover the ordered roots using the same SDK/environment policy as the Python facade.
+pub(crate) fn resolve_forward_pass_systems_roots() -> Result<Vec<PathBuf>, AicError> {
+    Python::with_gil(|py| {
+        py.import("aisimulate_core.sdk.rust_engine_step")?
+            .getattr("_resolve_forward_pass_systems_paths")?
+            .call1((Vec::<String>::new(),))?
+            .extract::<Vec<PathBuf>>()
+    })
+    .map_err(|error: PyErr| {
+        if Python::with_gil(|py| error.is_instance_of::<PyValueError>(py)) {
+            AicError::InvalidEngineConfig(format!("resolve systems paths: {error}"))
+        } else {
+            AicError::DataRoot(format!("resolve systems paths: {error}"))
+        }
+    })
+}
+
+/// Resolve the bundled `systems/` directory for [`AicEngine::from_spec`].
+///
+/// Mirrors the systems-root half of `DataRoots::discover` but does NOT require
+/// a `model_configs` root: `compile_engine` (the only thing that needs model
+/// configs) runs in Python, so the Rust side only loads the perf database.
+/// Precedence: explicit `systems_path` arg → `AICONFIGURATOR_SYSTEMS_PATH` env
+/// → the installed core wheel's SDK resource path → repo-relative
+/// `python/aisimulate/src/aisimulate_core/systems`.
+pub(crate) fn resolve_systems_root(systems_path: Option<&str>) -> PyResult<PathBuf> {
+    if let Some(p) = systems_path {
+        return Ok(PathBuf::from(p));
+    }
+    if let Some(p) = std::env::var_os("AICONFIGURATOR_SYSTEMS_PATH") {
+        return Ok(PathBuf::from(p));
+    }
+    let installed_root = Python::with_gil(|py| -> PyResult<Option<PathBuf>> {
+        let Ok(perf_database) = py.import("aisimulate_core.sdk.perf_database") else {
+            return Ok(None);
+        };
+        let paths: Vec<String> = perf_database.call_method0("get_systems_paths")?.extract()?;
+        Ok(paths.into_iter().next().map(PathBuf::from))
+    })?;
+    if let Some(p) = installed_root {
+        return Ok(p);
+    }
+    crate::repo_relative("python/aisimulate/src/aisimulate_core/systems").ok_or_else(|| {
+        PyValueError::new_err(
+            "could not resolve systems path: pass systems_path, set \
+             AICONFIGURATOR_SYSTEMS_PATH, install aisimulate, or run \
+             from an AIC checkout",
+        )
+    })
+}
+
+/// PyO3 wrapper around the [`Engine`]: a compiled engine the Python sweep /
+/// Mocker bridge drives per point.
+///
+/// Holds `Arc<Engine>` (the `Engine` already owns its `Arc<PerfDatabase>`), so
+/// the handle is cheap to clone and the GIL can be released around every
+/// compute call. The full `RuntimeConfig` is reconstructed from positional
+/// args on each call rather than stored — it varies per point.
+#[pyclass(name = "AicEngine")]
+pub struct AicEngine {
+    inner: Arc<Engine>,
+}
+
+impl AicEngine {
+    pub(crate) fn from_shared_engine(inner: Arc<Engine>) -> Self {
+        Self { inner }
+    }
+
+    /// Internal constructor shared by [`AicEngine::from_spec`] and
+    /// [`AicEngineBuilder::build`].
+    fn new(engine: Engine) -> Self {
+        AicEngine {
+            inner: Arc::new(engine),
+        }
+    }
+
+    /// Pure-Rust prefill-step latency (ms). No PyO3 `py` token: this is the
+    /// GIL-free Mocker hot path for Rust callers in OTHER crates (the Dynamo
+    /// Mocker, `tests/embedded_round_trip.rs`), which cannot reach the private
+    /// `inner` [`Engine`] directly. Delegates to
+    /// [`Engine::predict_prefill_latency`]. The `#[pymethods]`
+    /// `predict_prefill_latency` wraps this in `allow_threads`; this inherent
+    /// form is the same compute with no GIL ever acquired.
+    pub fn prefill_latency_ms(&self, bs: u32, isl: u32, prefix: u32) -> Result<f64, AicError> {
+        self.inner.predict_prefill_latency(bs, isl, prefix)
+    }
+
+    /// Pure-Rust decode-step latency (ms). No PyO3 `py` token. Delegates to
+    /// [`Engine::predict_decode_latency`].
+    pub fn decode_latency_ms(&self, bs: u32, isl: u32, osl: u32) -> Result<f64, AicError> {
+        self.inner.predict_decode_latency(bs, isl, osl)
+    }
+}
+
+#[pymethods]
+impl AicEngine {
+    /// Build an `AicEngine` from bincoded [`EngineSpec`] bytes (the output of
+    /// Python's `compile_engine`). `systems_path` overrides the bundled
+    /// `systems/` directory; `None` resolves it via env / repo-relative
+    /// fallback (see [`resolve_systems_root`]).
+    ///
+    /// Named constructor → `#[staticmethod]`, so Python calls
+    /// `AicEngine.from_spec(bytes, systems_path)`.
+    #[staticmethod]
+    #[pyo3(signature = (bytes, systems_path=None))]
+    fn from_spec(bytes: &[u8], systems_path: Option<&str>) -> PyResult<AicEngine> {
+        let systems_root = resolve_systems_root(systems_path)?;
+        // Engine::from_spec_bytes does from_bincode + PerfDatabase::load +
+        // Engine::build. No GIL is held inside the Rust core; releasing it
+        // here lets concurrent Python threads proceed during the DB load.
+        let engine = Python::with_gil(|py| {
+            py.allow_threads(|| Engine::from_spec_bytes(bytes, &systems_root))
+        })
+        .map_err(aic_to_py)?;
+        Ok(AicEngine::new(engine))
+    }
+
+    /// Python `run_static` / `run_static_latency_only` restricted to the
+    /// latency breakdown. Returns `(context_ms, generation_ms, total_ms)`.
+    ///
+    /// Positional args mirror the Python `BaseBackend.run_static` runtime shape,
+    /// in this exact order: `batch_size, beam_width, isl, osl, prefix,
+    /// seq_imbalance_correction_scale, gen_seq_imbalance_correction_scale`
+    /// (all seven required), then `mode` (`"static"|"static_ctx"|"static_gen"`,
+    /// default `"static"`) and `stride` (default `DEFAULT_STATIC_STRIDE`).
+    #[pyo3(signature = (
+        batch_size,
+        beam_width,
+        isl,
+        osl,
+        prefix,
+        seq_imbalance_correction_scale,
+        gen_seq_imbalance_correction_scale,
+        mode="static",
+        stride=DEFAULT_STATIC_STRIDE,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn run_static(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        beam_width: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+        mode: &str,
+        stride: u32,
+    ) -> PyResult<(f64, f64, f64)> {
+        // Arg extraction / mode parsing happen BEFORE allow_threads.
+        let rt = RuntimeConfig {
+            batch_size,
+            beam_width,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        };
+        let mode = parse_mode(mode)?;
+        // Per-call provenance scope (see `last_provenance`).
+        self.inner.reset_provenance();
+        // Rust compute runs with the GIL released.
+        let result: StaticResult = py
+            .allow_threads(|| self.inner.run_static(&rt, mode, stride))
+            .map_err(aic_to_py)?;
+        Ok((result.context_ms, result.generation_ms, result.total_ms))
+    }
+
+    /// Empirical provenance tier fired during the most recent compute call on
+    /// this handle (max-rank across ops, Python `worst_provenance` semantics),
+    /// or `None` when the call was answered purely from silicon tables.
+    ///
+    /// Every compute method (`run_static`, `predict_*_latency`,
+    /// `mixed_step_latency`, `decode_step_latency`) resets the accumulator on
+    /// entry, so this is per-call state — the Python bridge reads it right
+    /// after each call and forwards non-silicon tiers into
+    /// `util_empirical.note_provenance` (support-matrix HYBRID labelling).
+    /// Not meaningful under concurrent calls on one handle (the sweep drives
+    /// each handle sequentially).
+    fn last_provenance(&self) -> Option<&'static str> {
+        self.inner.last_provenance()
+    }
+
+    /// Mocker H1: prefill-step latency in ms. Thin shim over `run_static` with
+    /// `mode=Context` (osl is irrelevant for the context phase, so it is fixed
+    /// at 1). Returns the total ms (== context_ms in this mode).
+    #[pyo3(signature = (bs, isl, prefix=0))]
+    fn predict_prefill_latency(
+        &self,
+        py: Python<'_>,
+        bs: u32,
+        isl: u32,
+        prefix: u32,
+    ) -> PyResult<f64> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| self.inner.predict_prefill_latency(bs, isl, prefix))
+            .map_err(aic_to_py)
+    }
+
+    /// Mocker H2: decode-step latency in ms. Thin shim over `run_static` with
+    /// `mode=Generation`. Mocker passes `osl=2` (one decode step at
+    /// `s = isl + 1`). Returns the total ms (== generation_ms in this mode).
+    #[pyo3(signature = (bs, isl, osl=2))]
+    fn predict_decode_latency(&self, py: Python<'_>, bs: u32, isl: u32, osl: u32) -> PyResult<f64> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| self.inner.predict_decode_latency(bs, isl, osl))
+            .map_err(aic_to_py)
+    }
+
+    /// One prefill-step latency at the exact
+    /// `(batch_size, total_prefill_tokens, total_kv_read_tokens)` totals.
+    fn predict_prefill_latency_total(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        total_prefill_tokens: u32,
+        total_kv_read_tokens: u32,
+    ) -> PyResult<f64> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.predict_prefill_latency_total(
+                batch_size,
+                total_prefill_tokens,
+                total_kv_read_tokens,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// One FPM decode-step latency at the collector's exact
+    /// `(batch_size, total_past_kv_tokens)` coordinate.
+    fn predict_decode_latency_total(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        total_past_kv_tokens: u32,
+    ) -> PyResult<f64> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner
+                .predict_decode_latency_total(batch_size, total_past_kv_tokens)
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Highest collected decode KV-read total for an FPM engine, or `None`
+    /// for an op-level engine.
+    fn fpm_decode_kv_ceiling(&self, py: Python<'_>) -> PyResult<Option<u32>> {
+        py.allow_threads(|| self.inner.fpm_decode_kv_ceiling())
+            .map_err(aic_to_py)
+    }
+
+    /// One mixed (chunked-prefill + decode) engine-step latency in ms. Binds
+    /// [`Engine::mixed_step_latency`]; the Python agg orchestration
+    /// (`base_backend._get_mix_step_latency`) calls this per mix step. The
+    /// imbalance-correction scales default to 1.0 and mirror the
+    /// `RuntimeConfig` fields Python threads into the three passes.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
+                        seq_imbalance_correction_scale=1.0,
+                        gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn mixed_step_latency(
+        &self,
+        py: Python<'_>,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<f64> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.mixed_step_latency(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Component latencies for one mixed engine step. Returns
+    /// ``(total, shared_non_attention, context_attention, decode_attention)``.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0, seq_imbalance_correction_scale=1.0, gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn mixed_step_breakdown(
+        &self,
+        py: Python<'_>,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<(f64, f64, f64, f64)> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.mixed_step_breakdown(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
+        })
+        .map(|parts| (parts[0], parts[1], parts[2], parts[3]))
+        .map_err(aic_to_py)
+    }
+
+    /// One generation-only engine-step latency in ms. Binds
+    /// [`Engine::decode_step_latency`]; the Python agg orchestration
+    /// (`base_backend._get_genonly_step_latency`) calls this per genonly step.
+    #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
+    fn decode_step_latency(
+        &self,
+        py: Python<'_>,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<f64> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner
+                .decode_step_latency(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// `run_static` with the per-op values kept: returns
+    /// ``(context, generation)`` lists of ``(name, latency_ms, energy_wms,
+    /// source)`` tuples, NAME-FOLDED (each name crosses once, accumulated
+    /// with Python's phase-dict semantics; sources merge to ``"mixed"`` on
+    /// mismatch). Generation values are per-step-folded, then weighted by
+    /// the stride `repeat_count`; `latency_correction_scale` stays a
+    /// downstream Python multiply, exactly like `run_static`.
+    #[pyo3(signature = (
+        batch_size,
+        beam_width,
+        isl,
+        osl,
+        prefix,
+        seq_imbalance_correction_scale,
+        gen_seq_imbalance_correction_scale,
+        mode="static",
+        stride=DEFAULT_STATIC_STRIDE,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn run_static_per_op(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        beam_width: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+        mode: &str,
+        stride: u32,
+    ) -> PyResult<(Vec<PerOpValue>, Vec<PerOpValue>)> {
+        let rt = RuntimeConfig {
+            batch_size,
+            beam_width,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        };
+        let mode = parse_mode(mode)?;
+        self.inner.reset_provenance();
+        py.allow_threads(|| self.inner.run_static_per_op(&rt, mode, stride))
+            .map_err(aic_to_py)
+    }
+
+    /// Internal metadata-bearing counterpart of `run_static_per_op`; each
+    /// fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
+    #[pyo3(signature = (
+        batch_size,
+        beam_width,
+        isl,
+        osl,
+        prefix,
+        seq_imbalance_correction_scale,
+        gen_seq_imbalance_correction_scale,
+        mode="static",
+        stride=DEFAULT_STATIC_STRIDE,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn _run_static_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        beam_width: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+        mode: &str,
+        stride: u32,
+    ) -> PyResult<(Vec<PerOpValueWithMetadata>, Vec<PerOpValueWithMetadata>)> {
+        let rt = RuntimeConfig {
+            batch_size,
+            beam_width,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        };
+        let mode = parse_mode(mode)?;
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner
+                .run_static_per_op_with_metadata(&rt, mode, stride)
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// `mixed_step_breakdown` with the per-op values kept: returns
+    /// ``(shared_non_attention, context_attention, decode_attention)`` lists
+    /// of ``(name, latency_ms, energy_wms, source)`` tuples. The
+    /// context-attention entries arrive already divided by the
+    /// ``ceil(isl/ctx)`` scale, so each list sums to its breakdown bucket.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
+                        seq_imbalance_correction_scale=1.0,
+                        gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn mixed_step_breakdown_per_op(
+        &self,
+        py: Python<'_>,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<(Vec<PerOpValue>, Vec<PerOpValue>, Vec<PerOpValue>)> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.mixed_step_breakdown_per_op(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Internal metadata-bearing counterpart of `mixed_step_breakdown_per_op`;
+    /// each fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
+                        seq_imbalance_correction_scale=1.0,
+                        gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn _mixed_step_breakdown_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<(
+        Vec<PerOpValueWithMetadata>,
+        Vec<PerOpValueWithMetadata>,
+        Vec<PerOpValueWithMetadata>,
+    )> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.mixed_step_breakdown_per_op_with_metadata(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// `decode_step_latency` with the per-op values kept: returns a list of
+    /// ``(name, latency_ms, energy_wms, source)`` tuples for one
+    /// generation-only step.
+    #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
+    fn decode_step_per_op(
+        &self,
+        py: Python<'_>,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<Vec<PerOpValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner
+                .decode_step_per_op(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Internal metadata-bearing counterpart of `decode_step_per_op`; each
+    /// fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
+    #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
+    fn _decode_step_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<Vec<PerOpValueWithMetadata>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.decode_step_per_op_with_metadata(
+                gen_tokens,
+                isl,
+                osl,
+                gen_seq_imbalance_correction_scale,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Thin op-list evaluation FFI over the compiled CONTEXT op list:
+    /// evaluate the ops at `indices` (positions in the compiled spec's
+    /// `context_ops`, which mirror `model.context_ops` order) at the
+    /// context-phase shape, returning ``(name, latency_ms, energy_wms,
+    /// source)`` tuples, NAME-FOLDED (repeated names accumulate with `+=`,
+    /// sources merge to ``"mixed"`` on mismatch — Python phase-dict
+    /// semantics; first-encounter order). Python-side orchestration (AFD A/F
+    /// partitions) sources per-op values here; the orchestration itself
+    /// stays in Python.
+    #[pyo3(signature = (indices, batch_size, s, prefix=0, seq_imbalance_correction_scale=1.0, x=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_context_ops(
+        &self,
+        py: Python<'_>,
+        indices: Vec<usize>,
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        x: Option<u32>,
+    ) -> PyResult<Vec<PerOpValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.evaluate_context_ops(
+                &indices,
+                batch_size,
+                s,
+                prefix,
+                seq_imbalance_correction_scale,
+                x,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Thin op-list evaluation FFI over the compiled GENERATION op list at
+    /// the decode-step shape (see `evaluate_context_ops`).
+    #[pyo3(signature = (indices, batch_size, s, gen_seq_imbalance_correction_scale=1.0, prefix=0, x=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_generation_ops(
+        &self,
+        py: Python<'_>,
+        indices: Vec<usize>,
+        batch_size: u32,
+        s: u32,
+        gen_seq_imbalance_correction_scale: f64,
+        prefix: u32,
+        x: Option<u32>,
+    ) -> PyResult<Vec<PerOpValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.evaluate_generation_ops(
+                &indices,
+                batch_size,
+                s,
+                gen_seq_imbalance_correction_scale,
+                prefix,
+                x,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Evaluate an ad-hoc op list (JSON array of OpSpec objects — the same
+    /// externally-tagged encoding `EngineSpec` uses) against this engine's
+    /// database. Serves op lists deliberately NOT in the compiled spec (the
+    /// VL encoder phase); the caller keeps the shape math and passes the
+    /// resolved `(batch_size, s)` per group. `is_context` selects the
+    /// context-phase query shape (`x = batch * s`, logits-GEMM exception)
+    /// vs the decode-step shape.
+    #[pyo3(signature = (ops_json, is_context, batch_size, s, prefix=0, imbalance_correction_scale=1.0, x=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_ops_json(
+        &self,
+        py: Python<'_>,
+        ops_json: &str,
+        is_context: bool,
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        imbalance_correction_scale: f64,
+        x: Option<u32>,
+    ) -> PyResult<Vec<PerOpValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.evaluate_ops_json(
+                ops_json,
+                is_context,
+                batch_size,
+                s,
+                prefix,
+                imbalance_correction_scale,
+                x,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Evaluate context-attention kernels without fused RoPE/KV-write extras.
+    #[pyo3(signature = (ops_json, batch_size, s, prefix=0, imbalance_correction_scale=1.0, visual_block_upper_triangle=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_context_attention_kernels_json(
+        &self,
+        py: Python<'_>,
+        ops_json: &str,
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        imbalance_correction_scale: f64,
+        visual_block_upper_triangle: bool,
+    ) -> PyResult<Vec<PerOpValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.evaluate_context_attention_kernels_json(
+                ops_json,
+                batch_size,
+                s,
+                prefix,
+                imbalance_correction_scale,
+                visual_block_upper_triangle,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// `evaluate_ops_json` under the SOL_FULL view: every op is forced onto
+    /// its analytic SOL branch and the roofline decomposition is kept.
+    /// Returns ``(name, sol_time_ms, sol_math_ms, sol_mem_ms)`` tuples
+    /// (NAME-FOLDED, ``+=`` on all three) — the compiled-engine replacement
+    /// for Python's per-call ``query_*(..., database_mode=SOL_FULL)``
+    /// triples. Raises for op families whose SOL path does not export its
+    /// decomposition yet.
+    #[pyo3(signature = (ops_json, is_context, batch_size, s, prefix=0, imbalance_correction_scale=1.0, x=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_ops_sol_json(
+        &self,
+        py: Python<'_>,
+        ops_json: &str,
+        is_context: bool,
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        imbalance_correction_scale: f64,
+        x: Option<u32>,
+    ) -> PyResult<Vec<PerOpSolValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.evaluate_ops_sol_json(
+                ops_json,
+                is_context,
+                batch_size,
+                s,
+                prefix,
+                imbalance_correction_scale,
+                x,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Engine-side table view (PR-6): the raw collected data plane for one
+    /// retired Python loader, in that loader's exact nested-dict shape.
+    ///
+    /// ``attribute`` is the PerfDatabase attribute the loader used to fill
+    /// (``"_gemm_data"``, ...; the DSV4 sparse sub-tables address as
+    /// ``"_dsv4_sparse_kernel_data.<sub>"``). Returns ``None`` exactly when
+    /// the Python loader returned ``None`` (every source file missing);
+    /// otherwise an insertion-ordered JSON object whose string keys the
+    /// Python side rehydrates into enum/int/tuple keys per family. Views are
+    /// folded fresh from the parquet sources on every call — they are the
+    /// diagnostic/enumeration surface, not the query path, and deliberately
+    /// bypass the query grids' load-time normalizations (SOL clamping etc.).
+    fn table_view_json(&self, py: Python<'_>, attribute: &str) -> PyResult<Option<String>> {
+        py.allow_threads(|| {
+            crate::perf_database::table_view::table_view_json(self.inner.database(), attribute)
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Per-lane `(lane, slice_count, row_count)` density for one attention
+    /// QUERY table (AIC-1715/1716 follow-up). `attribute` is
+    /// `"_context_attention_data"` or `"_generation_attention_data"`.
+    ///
+    /// Unlike `table_view_json` (which folds the lane-blind enumeration
+    /// view kept for charts/support-matrix), this reads
+    /// `AttentionTable::context_lanes`/`generation_lanes` directly off the
+    /// QUERY-path `by_lane` structure — the real collected `kernel_source`
+    /// lanes, with the measured coverage `operations/attention.py::
+    /// lane_walk_order`'s donor/leftover tiers rank by. Empty (never an
+    /// error) when the table has no data at all, matching the tolerant
+    /// `unwrap_or_default()` the XSHAPE reference-grid fallback uses for
+    /// the same underlying accessor.
+    fn attention_lane_density(
+        &self,
+        py: Python<'_>,
+        attribute: &str,
+    ) -> PyResult<Vec<(String, u32, u32)>> {
+        py.allow_threads(|| {
+            let db = self.inner.database();
+            match attribute {
+                "_context_attention_data" => Ok(db.attention.context_lanes().unwrap_or_default()),
+                "_generation_attention_data" => {
+                    Ok(db.attention.generation_lanes().unwrap_or_default())
+                }
+                other => Err(PyValueError::new_err(format!(
+                    "attention_lane_density: unknown attribute {other:?}"
+                ))),
+            }
+        })
+    }
+}
+
+/// Inspect the compiled baseline for authoring a pinned external profile.
+#[pyfunction]
+fn engine_spec_json_from_bincode(bytes: &[u8]) -> PyResult<String> {
+    let spec =
+        crate::perfmodel::engine::spec::EngineSpec::from_bincode(bytes).map_err(aic_to_py)?;
+    serde_json::to_string(&spec).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Convert a JSON-encoded [`EngineSpec`] into bincode bytes (Python → Rust
+/// op-transfer). Python's `compile_engine` builds the `EngineSpec` as a JSON
+/// string (externally-tagged `Op` variants + `EngineConfig`) — JSON is the
+/// debuggable wire and the only format Python can produce — and calls this to
+/// get the bincode bytes that `AicEngine::from_spec` /
+/// [`AicEngineBuilder::build`] consume. `serde_json` round-trips
+/// `EngineConfig`'s `#[serde(flatten)]`
+/// cleanly (only bincode rejected it; that is exactly why `to_bincode`
+/// re-encodes `engine` as JSON inside the bincode payload).
+#[pyfunction]
+fn engine_spec_bincode_from_json(spec_json: &str) -> PyResult<Vec<u8>> {
+    let spec: crate::perfmodel::engine::spec::EngineSpec = serde_json::from_str(spec_json)
+        .map_err(|e| PyValueError::new_err(format!("engine spec JSON decode: {e}")))?;
+    spec.to_bincode().map_err(aic_to_py)
+}
+
+/// Constant per-op weight bytes for a JSON op list (PR-6): the batch FFI
+/// behind Python's `Operation.get_weights`. Weights are structural (computed
+/// from op fields alone, never from perf tables), so this is a module-level
+/// function — no engine handle, no database. Input is the same
+/// externally-tagged `Vec<Op>` JSON `evaluate_ops_json` takes (built by
+/// `engine.build_ops_json`); output is one f64 per op, in order.
+#[pyfunction]
+fn weights_ops_json(ops_json: &str) -> PyResult<Vec<f64>> {
+    let ops: Vec<crate::operators::Op> = serde_json::from_str(ops_json)
+        .map_err(|e| PyValueError::new_err(format!("ops JSON decode: {e}")))?;
+    Ok(ops.iter().map(crate::operators::Op::weight_bytes).collect())
+}
+
+/// The GEMM per-quant achieved-util LEVEL table, `(memory, compute, level)`
+/// rows (PR-6): the single source behind Python's former
+/// `_GEMM_QUANT_UTIL_LEVEL` mirror — Python rebuilds its dict from this, so
+/// the two sides can never drift again (#1524-class sync pain).
+#[pyfunction]
+fn gemm_quant_util_levels() -> Vec<(f64, f64, f64)> {
+    crate::operators::gemm::GEMM_QUANT_UTIL_LEVEL.to_vec()
+}
+
+/// The MoE per-quant achieved-util LEVEL table — see `gemm_quant_util_levels`.
+#[pyfunction]
+fn moe_quant_util_levels() -> Vec<(f64, f64, f64)> {
+    crate::operators::moe::MOE_QUANT_UTIL_LEVEL.to_vec()
+}
+
+/// The table-view attribute registry, `(attribute, [source basenames])` rows
+/// (PR-6): the single source behind the Python side's `VIEW_KEY_LAYERS` /
+/// baseline-codec attribute inventories — a completeness test set-compares
+/// them against this export so the four formerly hand-synced sites can never
+/// drift silently again (same pattern as `gemm_quant_util_levels`).
+#[pyfunction]
+fn table_view_attributes() -> Vec<(String, Vec<String>)> {
+    crate::perf_database::table_view::TABLE_VIEW_ATTRIBUTES
+        .iter()
+        .map(|(attribute, basenames)| {
+            (
+                attribute.to_string(),
+                basenames.iter().map(|b| b.to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
+/// Shared-layer source resolution report for ONE op-file basename (the
+/// deprecation-cleanup PR: the engine owns resolution,
+/// `perf_database/source_resolution.rs`). Returns JSON
+/// `{"records": [{version, path, channel, exists, ks_filter}...],
+///   "warnings": [{kind, args}...]}` — the Python `PerfDatabase` rebuilds its
+/// `data_provenance` diagnostics from `records` and re-emits `warnings`
+/// through its established logging registries. Resolution is a pure function
+/// of the tree, so this report always matches what the engine's own load
+/// resolved. `primary_path` preserves the retired Python resolver's
+/// caller-supplied-primary contract; `None` resolves it internally. Strict
+/// failures (malformed sidecar metadata with `strict=true`) raise
+/// `ValueError` with the resolver's message, mirroring the retired Python
+/// `_parse_reuse_yaml` / `_version_dir_state` errors.
+#[pyfunction]
+#[pyo3(signature = (systems_root, system_data_root, backend, version, op_file_basename, primary_path=None, enable_shared_layer=true, strict=false))]
+#[allow(clippy::too_many_arguments)]
+fn resolve_op_sources_report_json(
+    py: Python<'_>,
+    systems_root: &str,
+    system_data_root: &str,
+    backend: &str,
+    version: &str,
+    op_file_basename: &str,
+    primary_path: Option<&str>,
+    enable_shared_layer: bool,
+    strict: bool,
+) -> PyResult<String> {
+    let ctx = crate::perf_database::ResolveCtx {
+        systems_root: PathBuf::from(systems_root),
+        system_data_root: PathBuf::from(system_data_root),
+        backend: backend.to_string(),
+        version: version.to_string(),
+        enable_shared_layer,
+        strict,
+    };
+    let report = py
+        .allow_threads(|| {
+            crate::perf_database::resolve_one(
+                &ctx,
+                op_file_basename,
+                primary_path.map(std::path::Path::new),
+            )
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// The engine's spec schema version (single owner since the pyo3 op
+/// unification; Python reads it for diagnostics instead of declaring a twin).
+#[pyfunction]
+fn engine_spec_schema_version() -> u32 {
+    crate::ENGINE_SPEC_SCHEMA_VERSION
+}
+
+/// Serialize a sequence of engine-backed op objects to the externally-tagged
+/// OpSpec JSON array `AicEngine.evaluate_ops_json` consumes. Refuses retired
+/// tombstone ops (recursively) — the single gate on the one surface where
+/// ops leave Python as a spec (the compile path assembles its spec JSON
+/// through this same array).
+#[pyfunction]
+fn ops_json_from_ops(ops: &Bound<'_, PyAny>) -> PyResult<String> {
+    let ops = crate::py_ops::ops_from_sequence(ops)?;
+    crate::py_ops::reject_retired_ops(&ops).map_err(PyValueError::new_err)?;
+    serde_json::to_string(&ops).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Deserialize one externally-tagged opspec JSON document into an
+/// engine-backed op object (the FPMForwardOp adapter's bridge).
+#[pyfunction]
+fn op_from_spec_json(py: Python<'_>, spec_json: &str) -> PyResult<Py<PyAny>> {
+    crate::py_ops::op_from_spec_json(py, spec_json)
+}
+
+/// Internal payload accounting; the public construction path remains best_available.
+#[pyfunction]
+fn glm53_cache_bytes(spec_json: &str, seq_len: u32) -> PyResult<f64> {
+    let op: crate::operators::glm53flash::Glm53AttentionOp =
+        serde_json::from_str(spec_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    op.cache_bytes(seq_len)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Internal request shared by every Rust -> Python -> Rust construction path.
+///
+/// The public builder and the crate-internal `EngineConfig` path both normalize
+/// into this representation before the one-time Python compile. Keeping this
+/// type private lets the public builder evolve without creating a second public
+/// config API.
+#[derive(Clone, Debug)]
+struct EngineBuildRequest {
+    model_path: String,
+    system: String,
+    backend: String,
+    backend_version: Option<String>,
+    tp_size: u32,
+    pp_size: u32,
+    attention_dp_size: u32,
+    dcp_size: Option<u32>,
+    fpm_options: crate::FpmInterpolationConfig,
+    execution_profile: Option<(
+        crate::perfmodel::execution_profile::ExecutionProfileSelection,
+        crate::ForwardPassWorkerType,
+    )>,
+    moe_tp_size: Option<u32>,
+    moe_ep_size: Option<u32>,
+    cp_size: Option<u32>,
+    gemm_quant_mode: Option<String>,
+    moe_quant_mode: Option<String>,
+    kvcache_quant_mode: Option<String>,
+    fmha_quant_mode: Option<String>,
+    fpm_fmha_quant_mode: Option<String>,
+    comm_quant_mode: Option<String>,
+    attention_backend: Option<String>,
+    moe_backend: Option<String>,
+    enable_eplb: bool,
+    wideep_num_slots: Option<u32>,
+    moe_kernel_source: Option<String>,
+    nextn: u32,
+    speculation: Option<crate::ForwardPassSpeculationConfig>,
+    kv_block_size: Option<u32>,
+    systems_path: Option<String>,
+    forward_model: Option<String>,
+    fpm_profile: Option<String>,
+    worker_type: Option<String>,
+    fpm_interpolation: Option<String>,
+    fpm_parquet_path: Option<String>,
+    decoder_replay: bool,
+    database_mode: Option<String>,
+    shared_layer: Option<bool>,
+    transfer_policy: Option<Vec<String>>,
+    strict_provenance: Option<bool>,
+    encoder_parallel: Option<String>,
+}
+
+/// Ergonomic builder for the Rust -> Python -> Rust compiled-engine entry point.
+///
+/// Only the model, system, and backend are required. Parallelism defaults to
+/// one, speculative decoding defaults to disabled, and all other options defer
+/// to Python's `compile_engine` defaults.
+#[derive(Clone, Debug)]
+pub struct AicEngineBuilder {
+    request: EngineBuildRequest,
+}
+
+impl AicEngineBuilder {
+    /// Start an engine build for a model, target system, and backend.
+    pub fn new(
+        model_path: impl Into<String>,
+        system: impl Into<String>,
+        backend: BackendKind,
+    ) -> Self {
+        Self {
+            request: EngineBuildRequest {
+                model_path: model_path.into(),
+                system: system.into(),
+                backend: backend.as_str().to_owned(),
+                backend_version: None,
+                tp_size: 1,
+                pp_size: 1,
+                attention_dp_size: 1,
+                dcp_size: None,
+                fpm_options: crate::FpmInterpolationConfig::default(),
+                execution_profile: None,
+                moe_tp_size: None,
+                moe_ep_size: None,
+                cp_size: None,
+                gemm_quant_mode: None,
+                moe_quant_mode: None,
+                kvcache_quant_mode: None,
+                fmha_quant_mode: None,
+                fpm_fmha_quant_mode: None,
+                comm_quant_mode: None,
+                attention_backend: None,
+                moe_backend: None,
+                enable_eplb: false,
+                wideep_num_slots: None,
+                moe_kernel_source: None,
+                nextn: 0,
+                speculation: None,
+                kv_block_size: None,
+                systems_path: None,
+                forward_model: None,
+                fpm_profile: None,
+                worker_type: None,
+                fpm_interpolation: None,
+                fpm_parquet_path: None,
+                decoder_replay: false,
+                database_mode: None,
+                shared_layer: None,
+                transfer_policy: None,
+                strict_provenance: None,
+                encoder_parallel: None,
+            },
+        }
+    }
+
+    /// Forward-pass modeling mode (`"op_level"` | `"fpm"`); unset keeps
+    /// Python's default (op_level).
+    pub fn forward_model(mut self, forward_model: &str) -> Self {
+        self.request.forward_model = Some(forward_model.to_owned());
+        self
+    }
+
+    /// Use an external FPM parquet and its adjacent `.metadata.json` sidecar.
+    pub fn fpm_parquet_path(mut self, path: impl Into<String>) -> Self {
+        self.request.fpm_parquet_path = Some(path.into());
+        self
+    }
+
+    /// Select the verified V4.1 bounded decoder execution profile.
+    pub fn decoder_replay(mut self, enabled: bool) -> Self {
+        self.request.decoder_replay = enabled;
+        self
+    }
+
+    /// Select the performance-database lookup mode. Unset keeps SILICON.
+    pub fn database_mode(mut self, database_mode: DatabaseMode) -> Self {
+        self.request.database_mode = Some(database_mode.as_str().to_owned());
+        self
+    }
+
+    /// Control sibling/cross-version performance-data reuse.
+    pub fn shared_layer(mut self, enabled: bool) -> Self {
+        self.request.shared_layer = Some(enabled);
+        self
+    }
+
+    /// Limit empirical calibration transfers to the supplied kind tokens.
+    pub fn transfer_policy(mut self, transfer_policy: Vec<String>) -> Self {
+        self.request.transfer_policy = Some(transfer_policy);
+        self
+    }
+
+    /// Enable fail-closed performance-data provenance validation.
+    pub fn strict_provenance(mut self, enabled: bool) -> Self {
+        self.request.strict_provenance = Some(enabled);
+        self
+    }
+
+    /// Select a specific backend version.
+    pub fn backend_version(mut self, value: impl Into<String>) -> Self {
+        self.request.backend_version = Some(value.into());
+        self
+    }
+
+    /// Set tensor parallelism.
+    pub fn tp_size(mut self, value: u32) -> Self {
+        self.request.tp_size = value;
+        self
+    }
+
+    /// Set pipeline parallelism.
+    pub fn pp_size(mut self, value: u32) -> Self {
+        self.request.pp_size = value;
+        self
+    }
+
+    /// Set attention data parallelism.
+    pub fn attention_dp_size(mut self, value: u32) -> Self {
+        self.request.attention_dp_size = value;
+        self
+    }
+
+    /// Set optional MoE tensor and expert parallelism.
+    pub fn moe_parallelism(mut self, tp_size: Option<u32>, ep_size: Option<u32>) -> Self {
+        self.request.moe_tp_size = tp_size;
+        self.request.moe_ep_size = ep_size;
+        self
+    }
+
+    /// Set optional prefill context parallelism (`cp_size`, widens the attention
+    /// side) and decode context parallelism (`dcp_size`, stripes the decode KV
+    /// across the existing TP ranks). Unset keeps both at one.
+    pub fn context_parallelism(mut self, cp_size: Option<u32>, dcp_size: Option<u32>) -> Self {
+        self.request.cp_size = cp_size;
+        self.request.dcp_size = dcp_size;
+        self
+    }
+
+    /// Override the GEMM quantization mode.
+    pub fn gemm_quant_mode(mut self, value: impl Into<String>) -> Self {
+        self.request.gemm_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Override the MoE quantization mode.
+    pub fn moe_quant_mode(mut self, value: impl Into<String>) -> Self {
+        self.request.moe_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Override the KV-cache quantization mode.
+    pub fn kvcache_quant_mode(mut self, value: impl Into<String>) -> Self {
+        self.request.kvcache_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Select a whole-forward FPM cell without changing the SOL arithmetic.
+    pub fn fpm_fmha_dtype(mut self, value: impl Into<String>) -> Self {
+        self.request.fpm_fmha_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Override the FMHA quantization mode.
+    pub fn fmha_quant_mode(mut self, value: impl Into<String>) -> Self {
+        self.request.fmha_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Override the communication quantization mode.
+    pub fn comm_quant_mode(mut self, value: impl Into<String>) -> Self {
+        self.request.comm_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Override the attention kernel backend.
+    pub fn attention_backend(mut self, value: impl Into<String>) -> Self {
+        self.request.attention_backend = Some(value.into());
+        self
+    }
+
+    /// Select an exact collected MoE compute kernel-source lane.
+    pub fn moe_kernel_source(mut self, value: impl Into<String>) -> Self {
+        self.request.moe_kernel_source = Some(value.into());
+        self
+    }
+
+    /// Configure speculative decoding.
+    pub fn speculative_decoding(mut self, nextn: u32) -> Self {
+        self.request.nextn = nextn;
+        self
+    }
+
+    /// Override the KV-cache block size.
+    pub fn kv_block_size(mut self, value: u32) -> Self {
+        self.request.kv_block_size = Some(value);
+        self
+    }
+
+    /// Override the bundled systems-data root.
+    pub fn systems_path(mut self, value: impl Into<String>) -> Self {
+        self.request.systems_path = Some(value.into());
+        self
+    }
+
+    /// Compile the Python engine specification once and return a Rust handle.
+    pub fn build(self) -> Result<AicEngine, AicError> {
+        build_engine_from_request(self.request)
+    }
+}
+
+#[cfg(test)]
+mod builder_tests {
+    use super::*;
+
+    #[test]
+    fn builder_defaults_match_compile_engine_defaults() {
+        let builder = AicEngineBuilder::new("model", "system", BackendKind::Vllm);
+        assert_eq!(builder.request.tp_size, 1);
+        assert_eq!(builder.request.pp_size, 1);
+        assert_eq!(builder.request.attention_dp_size, 1);
+        assert_eq!(builder.request.nextn, 0);
+        assert!(builder.request.backend_version.is_none());
+        assert!(builder.request.moe_tp_size.is_none());
+        assert!(builder.request.moe_ep_size.is_none());
+        assert!(builder.request.attention_backend.is_none());
+        assert!(builder.request.moe_kernel_source.is_none());
+        assert!(builder.request.kv_block_size.is_none());
+        assert!(builder.request.fpm_parquet_path.is_none());
+        assert!(builder.request.database_mode.is_none());
+        assert!(builder.request.shared_layer.is_none());
+        assert!(builder.request.transfer_policy.is_none());
+        assert!(builder.request.strict_provenance.is_none());
+    }
+
+    #[test]
+    fn builder_retains_explicit_options() {
+        let builder = AicEngineBuilder::new("model", "system", BackendKind::Sglang)
+            .backend_version("0.5.9")
+            .tp_size(8)
+            .pp_size(2)
+            .attention_dp_size(4)
+            .moe_parallelism(Some(1), Some(8))
+            .attention_backend("fa3")
+            .moe_kernel_source("sglang_flashinfer_trtllm_moe")
+            .database_mode(DatabaseMode::Empirical)
+            .shared_layer(true)
+            .transfer_policy(vec!["xshape".to_owned(), "xquant".to_owned()])
+            .strict_provenance(true)
+            .speculative_decoding(2)
+            .kv_block_size(16)
+            .fpm_parquet_path("/artifacts/reviewed-fpm.parquet")
+            .systems_path("/tmp/systems");
+        assert_eq!(builder.request.backend, "sglang");
+        assert_eq!(builder.request.backend_version.as_deref(), Some("0.5.9"));
+        assert_eq!((builder.request.tp_size, builder.request.pp_size), (8, 2));
+        assert_eq!(builder.request.attention_dp_size, 4);
+        assert_eq!(
+            (builder.request.moe_tp_size, builder.request.moe_ep_size),
+            (Some(1), Some(8))
+        );
+        assert_eq!(builder.request.attention_backend.as_deref(), Some("fa3"));
+        assert_eq!(
+            builder.request.moe_kernel_source.as_deref(),
+            Some("sglang_flashinfer_trtllm_moe")
+        );
+        assert_eq!(builder.request.database_mode.as_deref(), Some("EMPIRICAL"));
+        assert_eq!(builder.request.shared_layer, Some(true));
+        assert_eq!(
+            builder.request.transfer_policy.as_deref(),
+            Some(["xshape".to_owned(), "xquant".to_owned()].as_slice())
+        );
+        assert_eq!(builder.request.strict_provenance, Some(true));
+        assert_eq!(builder.request.nextn, 2);
+        assert_eq!(builder.request.kv_block_size, Some(16));
+        assert_eq!(
+            builder.request.fpm_parquet_path.as_deref(),
+            Some("/artifacts/reviewed-fpm.parquet")
+        );
+        assert_eq!(
+            builder.request.systems_path.as_deref(),
+            Some("/tmp/systems")
+        );
+    }
+
+    #[test]
+    fn forward_pass_config_retains_database_policy() {
+        let config: EngineConfig = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "model_name": "model",
+            "system_name": "system",
+            "backend": "vllm",
+            "backend_version": "0.25.1",
+            "forward_model": "fpm",
+            "fpm_parquet_path": "/artifacts/reviewed-fpm.parquet",
+            "kv_block_size": null,
+            "tp_size": 4,
+            "pp_size": 1,
+            "attention_dp_size": 1,
+            "weight_dtype": null,
+            "moe_dtype": null,
+            "activation_dtype": null,
+            "fpm_fmha_dtype": "fp8",
+            "forward_model": "fpm",
+            "kv_cache_dtype": null,
+            "database_mode": "EMPIRICAL",
+            "enable_shared_layer": true,
+            "transfer_policy": ["xshape", "xquant"],
+            "strict_provenance": true,
+            "extra": {"fpm_profile": "{\"model\":\"model\"}", "fpm_interpolation": "direct"}
+        }))
+        .expect("deserialize engine config");
+
+        let request = engine_build_request(&config, None).unwrap();
+
+        assert_eq!(request.database_mode.as_deref(), Some("EMPIRICAL"));
+        assert_eq!(request.fpm_fmha_quant_mode.as_deref(), Some("fp8"));
+        assert_eq!(request.fmha_quant_mode, None);
+        assert_eq!(request.shared_layer, Some(true));
+        assert_eq!(
+            request.transfer_policy.as_deref(),
+            Some(["xshape".to_owned(), "xquant".to_owned()].as_slice())
+        );
+        assert_eq!(request.strict_provenance, Some(true));
+        assert_eq!(request.fpm_profile.as_deref(), Some(r#"{"model":"model"}"#));
+        assert_eq!(request.fpm_interpolation.as_deref(), Some("direct"));
+        assert_eq!(request.cp_size, None);
+        assert_eq!(
+            request.fpm_parquet_path.as_deref(),
+            Some("/artifacts/reviewed-fpm.parquet")
+        );
+    }
+
+    #[test]
+    fn builder_rejects_invalid_fpm_paths_before_entering_python() {
+        for (path, model) in [("", "fpm"), ("/missing/fpm.parquet", "op_level")] {
+            let result = AicEngineBuilder::new("model", "system", BackendKind::Vllm)
+                .forward_model(model)
+                .fpm_parquet_path(path)
+                .build();
+            assert!(
+                matches!(result, Err(AicError::InvalidEngineConfig(message)) if message.contains("fpm_parquet_path"))
+            );
+        }
+    }
+
+    #[test]
+    fn builder_rejects_sol_full_as_database_default() {
+        let result = AicEngineBuilder::new("model", "system", BackendKind::Vllm)
+            .database_mode(DatabaseMode::SolFull)
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(AicError::InvalidEngineConfig(message))
+                if message.contains("SOL_FULL") && message.contains("per-call diagnostic")
+        ));
+    }
+
+    #[test]
+    fn builder_rejects_fpm_selector_without_fpm_before_loading_python() {
+        let result = AicEngineBuilder::new("model", "system", BackendKind::Vllm)
+            .fpm_fmha_dtype("fp8")
+            .build();
+        assert!(matches!(result, Err(AicError::InvalidEngineConfig(message))
+            if message.contains("requires forward_model='fpm'")));
+    }
+}
+
+/// Construct the public handle from the one canonical build request.
+fn build_engine_from_request(request: EngineBuildRequest) -> Result<AicEngine, AicError> {
+    let engine = compile_engine_from_request(request)?;
+    Ok(AicEngine::new(engine))
+}
+
+/// Shared `Rust → Python → Rust` compile body: cross into Python once to run
+/// `compile_engine` from one normalized request, then build an [`Engine`] from
+/// the returned bincode bytes (`from_bincode` + `PerfDatabase::load` +
+/// `Engine::build`).
+/// The public builder and [`compile_engine_to_engine`] both use this function,
+/// so Python argument names and defaults cannot drift.
+fn compile_engine_from_request(request: EngineBuildRequest) -> Result<Engine, AicError> {
+    if request.cp_size == Some(0) {
+        return Err(AicError::InvalidEngineConfig(
+            "cp_size must be a positive integer, got 0".to_string(),
+        ));
+    }
+    if request.fpm_fmha_quant_mode.is_some() && request.forward_model.as_deref() != Some("fpm") {
+        return Err(AicError::InvalidEngineConfig(
+            "fpm_fmha_dtype requires forward_model='fpm'".into(),
+        ));
+    }
+
+    crate::config::validate_fpm_parquet_path(
+        request.fpm_parquet_path.as_deref().map(Path::new),
+        request.forward_model.as_deref() == Some("fpm"),
+    )?;
+
+    if request.database_mode.as_deref() == Some(DatabaseMode::SolFull.as_str()) {
+        return Err(AicError::InvalidEngineConfig(
+            "database mode SOL_FULL is a per-call diagnostic and cannot be an engine default; use SOL instead"
+                .to_string(),
+        ));
+    }
+    let systems_root = resolve_systems_root(request.systems_path.as_deref())
+        .map_err(|e| AicError::DataRoot(format!("resolve systems path: {e}")))?;
+    let systems_root_str = systems_root.to_str().ok_or_else(|| {
+        AicError::DataRoot(format!(
+            "systems path is not valid UTF-8: {}",
+            systems_root.display()
+        ))
+    })?;
+    let spec_bytes: Vec<u8> = Python::with_gil(|py| -> PyResult<Vec<u8>> {
+        let engine_mod = py.import("aisimulate_core.sdk.engine")?;
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("backend_version", request.backend_version.as_deref())?;
+        kwargs.set_item("tp_size", request.tp_size)?;
+        kwargs.set_item("pp_size", request.pp_size)?;
+        kwargs.set_item("attention_dp_size", request.attention_dp_size)?;
+        if let Some(dcp) = request.dcp_size {
+            kwargs.set_item("dcp_size", dcp)?;
+        }
+        if request.fpm_options != crate::FpmInterpolationConfig::default() {
+            let encoded = serde_json::to_string(&request.fpm_options)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let options = PyModule::import(py, "json")?.call_method1("loads", (encoded,))?;
+            kwargs.set_item("fpm_options", options)?;
+        }
+        kwargs.set_item("moe_tp_size", request.moe_tp_size)?;
+        kwargs.set_item("moe_ep_size", request.moe_ep_size)?;
+        kwargs.set_item("cp_size", request.cp_size.unwrap_or(1))?;
+        kwargs.set_item("gemm_quant_mode", request.gemm_quant_mode.as_deref())?;
+        kwargs.set_item("moe_quant_mode", request.moe_quant_mode.as_deref())?;
+        kwargs.set_item("kvcache_quant_mode", request.kvcache_quant_mode.as_deref())?;
+        kwargs.set_item("fmha_quant_mode", request.fmha_quant_mode.as_deref())?;
+        kwargs.set_item(
+            "fpm_fmha_quant_mode",
+            request.fpm_fmha_quant_mode.as_deref(),
+        )?;
+        kwargs.set_item("comm_quant_mode", request.comm_quant_mode.as_deref())?;
+        kwargs.set_item("attention_backend", request.attention_backend.as_deref())?;
+        kwargs.set_item("moe_backend", request.moe_backend.as_deref())?;
+        kwargs.set_item("enable_eplb", request.enable_eplb)?;
+        kwargs.set_item("wideep_num_slots", request.wideep_num_slots)?;
+        kwargs.set_item("moe_kernel_source", request.moe_kernel_source.as_deref())?;
+        kwargs.set_item("forward_model", request.forward_model.as_deref())?;
+        kwargs.set_item("fpm_profile", request.fpm_profile.as_deref())?;
+        if let Some(worker_type) = request.worker_type.as_deref() {
+            kwargs.set_item("worker_type", worker_type)?;
+        }
+        kwargs.set_item("fpm_interpolation", request.fpm_interpolation.as_deref())?;
+        kwargs.set_item("fpm_parquet_path", request.fpm_parquet_path.as_deref())?;
+        kwargs.set_item("decoder_replay", request.decoder_replay)?;
+        kwargs.set_item("database_mode", request.database_mode.as_deref())?;
+        kwargs.set_item("shared_layer", request.shared_layer)?;
+        kwargs.set_item("transfer_policy", request.transfer_policy.as_deref())?;
+        kwargs.set_item("strict_provenance", request.strict_provenance)?;
+        kwargs.set_item("encoder_parallel", request.encoder_parallel.as_deref())?;
+        kwargs.set_item("nextn", request.nextn)?;
+        if let Some(speculation) = &request.speculation {
+            let json = serde_json::to_string(speculation)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let value = PyModule::import(py, "json")?.call_method1("loads", (json,))?;
+            kwargs.set_item("speculation", value)?;
+        }
+        kwargs.set_item("kv_block_size", request.kv_block_size)?;
+        kwargs.set_item("systems_path", systems_root_str)?;
+        engine_mod
+            .call_method(
+                "compile_engine",
+                (
+                    request.model_path.as_str(),
+                    request.system.as_str(),
+                    request.backend.as_str(),
+                ),
+                Some(&kwargs),
+            )?
+            .extract::<Vec<u8>>()
+    })
+    // PyErr → AicError inline (keeps error.rs pyo3-free). A `compile_engine`
+    // failure means the model cannot be built natively, so it maps to
+    // `UnsupportedModel` — the variant `best_available` treats as
+    // fallback-safe. Hard caller/config errors use `InvalidEngineConfig` (which
+    // is NOT fallback-safe) so they surface instead of silently degrading.
+    .map_err(|error| {
+        let invalid = Python::with_gil(|py| {
+            py.import("aisimulate_core.sdk.engine")
+                .and_then(|module| module.getattr("InvalidEngineConfigurationError"))
+                .is_ok_and(|kind| error.is_instance(py, &kind))
+        });
+        if invalid {
+            AicError::InvalidEngineConfig(format!("compile_engine: {error}"))
+        } else {
+            AicError::UnsupportedModel(format!("compile_engine: {error}"))
+        }
+    })?;
+
+    if request.backend_version.is_none()
+        && crate::perfmodel::engine::spec::EngineSpec::from_bincode(&spec_bytes)?
+            .engine
+            .backend_version
+            .is_none()
+    {
+        return Err(AicError::DataRoot(format!(
+            "no backend version is available for {}/{}/{}",
+            systems_root.display(),
+            request.system,
+            request.backend,
+        )));
+    }
+    if let Some((selection, worker_type)) = &request.execution_profile {
+        let spec = crate::perfmodel::engine::spec::EngineSpec::from_bincode(&spec_bytes)?;
+        let (spec, snapshot) = selection.apply(spec, &systems_root, *worker_type)?;
+        let mut engine = Engine::from_spec_bytes(&spec.to_bincode()?, snapshot.path())?;
+        engine.profile_snapshot = Some(snapshot);
+        return Ok(engine);
+    }
+    Engine::from_spec_bytes(&spec_bytes, systems_root.as_path() as &Path)
+}
+
+/// Validate scheme parameters and pin draft content before selection and caching.
+/// The SDK registry supplies geometry only; Rust still owns estimator selection.
+pub(crate) fn resolve_speculation_identity(
+    config: &crate::ForwardPassSpeculationConfig,
+) -> Result<crate::ForwardPassSpeculationConfig, AicError> {
+    Python::with_gil(|py| -> PyResult<_> {
+        let json = PyModule::import(py, "json")?;
+        let encoded = serde_json::to_string(config)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let fields = json.call_method1("loads", (encoded,))?;
+        let module = PyModule::import(py, "aisimulate_core.sdk.speculation.base")?;
+        let spec = module
+            .getattr("SpeculationConfig")?
+            .call((), Some(fields.downcast()?))?;
+        let resolved = module.call_method1("resolve_speculation_config", (spec,))?;
+        let fields = PyModule::import(py, "dataclasses")?.call_method1("asdict", (resolved,))?;
+        let encoded: String = json.call_method1("dumps", (fields,))?.extract()?;
+        serde_json::from_str(&encoded).map_err(|error| PyValueError::new_err(error.to_string()))
+    })
+    .map_err(|error| {
+        let checkpoint_unavailable = Python::with_gil(|py| {
+            py.import("aisimulate_core.sdk.utils")
+                .and_then(|module| module.getattr("HuggingFaceDownloadError"))
+                .is_ok_and(|kind| error.is_instance(py, &kind))
+        });
+        if checkpoint_unavailable {
+            // Match native construction's checkpoint-availability category.
+            // Identity resolution still fails before estimator selection.
+            AicError::UnsupportedModel(format!("speculation checkpoint unavailable: {error}"))
+        } else {
+            AicError::InvalidEngineConfig(format!("speculation: {error}"))
+        }
+    })
+}
+
+/// Check the existing replay executor against a canonical resolved cost identity.
+pub(crate) fn speculation_replay_depth(
+    config: &crate::ForwardPassSpeculationConfig,
+) -> Result<u32, AicError> {
+    Python::with_gil(|py| -> PyResult<_> {
+        let encoded = serde_json::to_string(config)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let fields = PyModule::import(py, "json")?.call_method1("loads", (encoded,))?;
+        PyModule::import(py, "aisimulate_core.sdk.speculation")?
+            .getattr("SpeculationConfig")?
+            .call((), Some(fields.downcast()?))?
+            .call_method0("replay_depth")?
+            .extract()
+    })
+    .map_err(|error| AicError::InvalidEngineConfig(format!("speculation: {error}")))
+}
+
+/// Profile schema/identity facts supplied by Python without choosing an estimator.
+#[derive(serde::Deserialize)]
+pub(crate) struct ForwardPassProfileFacts {
+    pub profile: serde_json::Map<String, serde_json::Value>,
+    pub registered: bool,
+    pub gemm_quant_mode: String,
+    pub moe_quant_mode: String,
+    pub fmha_quant_mode: String,
+    pub kvcache_quant_mode: String,
+    pub comm_quant_mode: String,
+    pub attention_backend: String,
+}
+
+pub(crate) fn validate_forward_pass_profile(
+    config: &crate::ForwardPassPerfModelConfig,
+) -> Result<ForwardPassProfileFacts, AicError> {
+    let json = serde_json::to_string(config)
+        .map_err(|error| AicError::InvalidEngineConfig(error.to_string()))?;
+    let facts = Python::with_gil(|py| -> PyResult<String> {
+        py.import("aisimulate_core.sdk.fpm_profile")?
+            .call_method1("_validate_forward_pass_profile", (json,))?
+            .extract()
+    })
+    .map_err(|error| AicError::InvalidEngineConfig(format!("fpm_profile: {error}")))?;
+    serde_json::from_str(&facts)
+        .map_err(|error| AicError::InvalidEngineConfig(format!("fpm_profile facts: {error}")))
+}
+
+/// Compile the selected canonical native estimator through the shared builder.
+pub(crate) fn compile_forward_pass_model_to_engine(
+    config: &crate::ForwardPassPerfModelConfig,
+    systems_path: &str,
+) -> Result<Engine, AicError> {
+    let forward_model = config.estimation_mode.native_name().ok_or_else(|| {
+        AicError::InvalidEngineConfig(
+            "a native estimator mode must be selected before compilation".into(),
+        )
+    })?;
+    compile_engine_from_request(EngineBuildRequest {
+        model_path: config.model.clone(),
+        system: config.system.clone(),
+        backend: config.backend.as_str().to_owned(),
+        backend_version: config.backend_version.clone(),
+        tp_size: config.tp,
+        pp_size: config.pp,
+        attention_dp_size: config.attention_dp,
+        dcp_size: config.dcp,
+        fpm_options: config.estimator_config.fpm_interpolation.clone(),
+        execution_profile: config
+            .estimator_config
+            .op_level
+            .execution_profile
+            .clone()
+            .map(|selection| (selection, config.worker_type)),
+        moe_tp_size: config.moe_tp_size,
+        moe_ep_size: config.moe_ep_size,
+        cp_size: config.cp_size,
+        gemm_quant_mode: config.gemm_quant_mode.clone(),
+        moe_quant_mode: config.moe_quant_mode.clone(),
+        kvcache_quant_mode: config.kvcache_quant_mode.clone(),
+        fmha_quant_mode: config.fmha_quant_mode.clone(),
+        fpm_fmha_quant_mode: if forward_model == "fpm" {
+            config.fpm_fmha_quant_mode.clone()
+        } else {
+            None
+        },
+        comm_quant_mode: config.comm_quant_mode.clone(),
+        attention_backend: config.attention_backend.clone(),
+        moe_backend: config.moe_backend.clone(),
+        enable_eplb: config.enable_eplb,
+        wideep_num_slots: config.wideep_num_slots,
+        moe_kernel_source: config.moe_kernel_source.clone(),
+        nextn: config.nextn,
+        speculation: config.speculation.clone(),
+        kv_block_size: config.kv_block_size,
+        systems_path: Some(systems_path.to_owned()),
+        forward_model: Some(forward_model.to_owned()),
+        worker_type: Some(
+            match config.worker_type {
+                crate::ForwardPassWorkerType::Prefill => "prefill",
+                crate::ForwardPassWorkerType::Decode => "decode",
+                crate::ForwardPassWorkerType::Aggregated => "aggregated",
+            }
+            .to_owned(),
+        ),
+        fpm_profile: config
+            .fpm_profile
+            .as_ref()
+            .map(|profile| serde_json::to_string(profile).expect("JSON profile")),
+        fpm_interpolation: Some(
+            config
+                .estimator_config
+                .fpm_interpolation
+                .method
+                .as_str()
+                .to_owned(),
+        ),
+        fpm_parquet_path: if config.estimation_mode == crate::EstimationMode::FpmInterpolation {
+            crate::config::validate_fpm_parquet_path(
+                config
+                    .estimator_config
+                    .fpm_interpolation
+                    .fpm_parquet_path
+                    .as_deref(),
+                true,
+            )?
+            .map(str::to_owned)
+        } else {
+            None
+        },
+        decoder_replay: config.decoder_replay,
+        database_mode: Some(config.database_mode.as_str().to_owned()),
+        shared_layer: config.enable_shared_layer,
+        transfer_policy: config.transfer_policy.clone(),
+        strict_provenance: Some(config.strict_provenance),
+        encoder_parallel: config
+            .encoder_parallel
+            .map(|parallel| parallel.as_str().to_owned()),
+    })
+}
+
+/// Build a compiled [`Engine`] from a modular [`EngineConfig`] (the
+/// `fpm::ForwardPassPerfModel::from_native` entry point). Maps the
+/// config's nested fields onto the shared [`EngineBuildRequest`].
+///
+/// Quantization: each `DataType` is mapped to the matching backend quant-mode
+/// enum NAME per target field (see [`gemm_quant_name`] etc.). DataTypes with no
+/// valid name in a given target enum (e.g. `float16` for GEMM) map to `None`,
+/// so `compile_engine` auto-infers quant from the model's HF config — which is
+/// the correct behavior for quantized HF model IDs (quant is override-when-
+/// present in `_apply_model_quant_defaults`). `pub(crate)` and called from the
+/// private `fpm` module via `crate::py::compile_engine_to_engine`.
+pub(crate) fn compile_engine_to_engine(
+    config: &EngineConfig,
+    systems_path: Option<&str>,
+) -> Result<Engine, AicError> {
+    if config.quantization.fpm_fmha_dtype.is_some()
+        && fmha_quant_name(config.quantization.fpm_fmha_dtype.as_ref()).is_none()
+    {
+        return Err(AicError::InvalidEngineConfig(
+            "fpm_fmha_dtype must be bfloat16, fp8, or fp8_block".into(),
+        ));
+    }
+    let mut request = engine_build_request(config, systems_path)?;
+    if config.extra.contains_key("estimator_config") || request.fpm_interpolation.is_some() {
+        let controls = crate::EstimatorConfig::migrate_legacy_inputs(
+            config.extra.get("estimator_config").map(String::as_str),
+            None,
+            request.fpm_interpolation.as_deref(),
+            request.fpm_parquet_path.as_deref(),
+        )?;
+        if controls.op_level.execution_profile.is_some() {
+            return Err(AicError::InvalidEngineConfig(
+                "external execution profiles require the canonical best_available interface".into(),
+            ));
+        }
+        request.fpm_options = controls.fpm_interpolation.clone();
+        request.fpm_interpolation = match controls.fpm_interpolation.method {
+            crate::FpmInterpolationMethod::Auto => None,
+            method => Some(method.as_str().to_owned()),
+        };
+        request.fpm_parquet_path = controls
+            .fpm_interpolation
+            .fpm_parquet_path
+            .map(|path| path.to_str().expect("validated UTF-8 path").to_owned());
+    }
+    if config.extra.contains_key("fpm_profile") {
+        let mut modes = Python::with_gil(|py| fpm_profile_quantization(py, config))
+            .map_err(|e| AicError::InvalidEngineConfig(format!("FPM profile quantization: {e}")))?;
+        request.gemm_quant_mode = modes.remove("gemm_quant_mode");
+        request.moe_quant_mode = modes.remove("moe_quant_mode");
+        request.kvcache_quant_mode = modes.remove("kvcache_quant_mode");
+        request.fmha_quant_mode = modes.remove("fmha_quant_mode");
+        request.comm_quant_mode = modes.remove("comm_quant_mode");
+    }
+    compile_engine_from_request(request)
+}
+
+/// Restore profile precision shared by the native timing and memory bridges.
+/// Python checks the wire dtypes before recovering exact quantization modes.
+pub(crate) fn fpm_profile_quantization(
+    py: Python<'_>,
+    config: &EngineConfig,
+) -> PyResult<std::collections::BTreeMap<String, String>> {
+    let config_json = serde_json::to_string(config)
+        .map_err(|e| PyValueError::new_err(format!("invalid engine config: {e}")))?;
+    py.import("aisimulate_core.sdk.fpm_profile")?
+        .call_method1("_quantization_from_engine_config", (config_json,))?
+        .extract()
+}
+
+fn engine_build_request(
+    config: &EngineConfig,
+    systems_path: Option<&str>,
+) -> Result<EngineBuildRequest, AicError> {
+    let nextn = config
+        .speculative
+        .as_ref()
+        .and_then(|s| s.nextn)
+        .unwrap_or(0);
+    Ok(EngineBuildRequest {
+        model_path: config.model_name.clone(),
+        system: config.system_name.clone(),
+        backend: config.backend.as_str().to_owned(),
+        backend_version: config.backend_version.clone(),
+        tp_size: config.parallel.tp_size,
+        pp_size: config.parallel.pp_size,
+        attention_dp_size: config.parallel.attention_dp_size.unwrap_or(1),
+        dcp_size: config.parallel.dcp_size,
+        fpm_options: crate::FpmInterpolationConfig::default(),
+        execution_profile: None,
+        moe_tp_size: config.parallel.moe_tp_size,
+        moe_ep_size: config.parallel.moe_ep_size,
+        cp_size: config.parallel.cp_size,
+        gemm_quant_mode: gemm_quant_name(config.quantization.weight_dtype.as_ref())
+            .map(str::to_owned),
+        moe_quant_mode: moe_quant_name(config.quantization.moe_dtype.as_ref()).map(str::to_owned),
+        kvcache_quant_mode: kvcache_quant_name(config.quantization.kv_cache_dtype.as_ref())
+            .map(str::to_owned),
+        fmha_quant_mode: fmha_quant_name(config.quantization.activation_dtype.as_ref())
+            .map(str::to_owned),
+        fpm_fmha_quant_mode: fmha_quant_name(config.quantization.fpm_fmha_dtype.as_ref())
+            .map(str::to_owned),
+        // Comm quant is not carried on EngineConfig; let Python default it.
+        comm_quant_mode: None,
+        // Attention backend is not carried on EngineConfig; let Python resolve it.
+        attention_backend: None,
+        moe_backend: None,
+        enable_eplb: false,
+        wideep_num_slots: None,
+        moe_kernel_source: config.moe_kernel_source.clone(),
+        nextn,
+        speculation: None,
+        kv_block_size: config.kv_block_size,
+        systems_path: systems_path.map(str::to_owned),
+        forward_model: config.forward_model.clone(),
+        fpm_profile: config.extra.get("fpm_profile").cloned(),
+        worker_type: config.extra.get("worker_type").cloned(),
+        fpm_interpolation: config.extra.get("fpm_interpolation").cloned(),
+        fpm_parquet_path: crate::config::validate_fpm_parquet_path(
+            config.fpm_parquet_path.as_deref(),
+            config.forward_model.as_deref() == Some("fpm"),
+        )?
+        .map(str::to_owned),
+        decoder_replay: config.decoder_replay,
+        database_mode: Some(config.database_mode.as_str().to_owned()),
+        shared_layer: config.enable_shared_layer,
+        transfer_policy: config.transfer_policy.clone(),
+        strict_provenance: Some(config.strict_provenance),
+        encoder_parallel: None,
+    })
+}
+
+/// `DataType` → `GEMMQuantMode` enum name. `None` (auto-infer) for DataTypes
+/// with no GEMM equivalent. Identity for bf16/fp8/fp8_static/fp8_block/nvfp4
+/// and w4a16_nvfp4; `int8`→`int8_wo`, `int4`→`int4_wo`.
+fn gemm_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
+    match dtype? {
+        DataType::Bfloat16 => Some("bfloat16"),
+        DataType::Fp8 => Some("fp8"),
+        DataType::Fp8Static => Some("fp8_static"),
+        DataType::Fp8Block => Some("fp8_block"),
+        DataType::Nvfp4 => Some("nvfp4"),
+        DataType::Int8 => Some("int8_wo"),
+        DataType::Int4 => Some("int4_wo"),
+        DataType::W4a16Nvfp4 => Some("w4a16_nvfp4"),
+        // float16, w4afp8, w4a16_mxfp4, w4a8_mxfp4_mxfp8 have no GEMM enum name.
+        _ => None,
+    }
+}
+
+/// `DataType` → `MoEQuantMode` enum name. `None` for unmapped.
+fn moe_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
+    match dtype? {
+        DataType::Bfloat16 => Some("bfloat16"),
+        DataType::Fp8 => Some("fp8"),
+        DataType::Fp8Block => Some("fp8_block"),
+        DataType::Nvfp4 => Some("nvfp4"),
+        DataType::Int4 => Some("int4_wo"),
+        DataType::W4afp8 => Some("w4afp8"),
+        DataType::W4a16Mxfp4 => Some("w4a16_mxfp4"),
+        DataType::W4a16Mxfp4Humming => Some("w4a16_mxfp4_humming"),
+        DataType::W4a8Mxfp4Mxfp8 => Some("w4a8_mxfp4_mxfp8"),
+        DataType::W4a16Nvfp4 => Some("w4a16_nvfp4"),
+        _ => None,
+    }
+}
+
+/// `DataType` → `FMHAQuantMode` enum name. Only bf16/fp8/fp8_block exist.
+fn fmha_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
+    match dtype? {
+        DataType::Bfloat16 => Some("bfloat16"),
+        DataType::Fp8 => Some("fp8"),
+        DataType::Fp8Block => Some("fp8_block"),
+        _ => None,
+    }
+}
+
+/// `DataType` → `KVCacheQuantMode` enum name. Only bf16/int8/fp8 exist.
+fn kvcache_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
+    match dtype? {
+        DataType::Bfloat16 => Some("bfloat16"),
+        DataType::Int8 => Some("int8"),
+        DataType::Fp8 => Some("fp8"),
+        _ => None,
+    }
+}
+
+/// PyO3 wrapper around [`crate::ForwardPassPerfModel`] (PR #1152), the
+/// forward-pass latency model with online correction + regression fallback.
+///
+/// The hot path (`estimate_forward_pass_time_ms` / `tune_with_fpms`) is pure
+/// Rust over the embedded [`Engine`] with NO Python re-entry — the GIL is
+/// released via [`Python::allow_threads`] around each compute. Only the
+/// constructors (`from_native` / `best_available`) cross into Python once to
+/// compile the model (`compile_engine`); that crossing re-acquires the GIL via
+/// `with_gil`, which is re-entrant, so calling it from inside a `#[pymethod]`
+/// staticmethod is fine.
+///
+/// Constructors take the engine config + options as JSON strings. Regression
+/// construction additionally takes the engine-level worker type so every DP
+/// rank is evaluated with one fixed feature schema.
+#[pyclass(name = "RustForwardPassPerfModel")]
+pub struct PyForwardPassPerfModel {
+    inner: crate::ForwardPassPerfModel,
+}
+
+fn parse_forward_pass_config(config_json: &str) -> PyResult<crate::ForwardPassPerfModelConfig> {
+    let mut de = serde_json::Deserializer::from_str(config_json);
+    let config = serde_path_to_error::deserialize(&mut de)
+        .map_err(|e| PyValueError::new_err(format!("invalid forward-pass config at {e}")))?;
+    de.end()
+        .map_err(|e| PyValueError::new_err(format!("invalid forward-pass config: {e}")))?;
+    Ok(config)
+}
+
+/// Parse an FPM payload JSON into one iteration's per-rank list. Accepts either
+/// a single FPM object or a JSON array of FPM objects (the wrapper's
+/// single-rank convenience form). Matches the old ctypes marshalling.
+fn parse_fpm_iteration(fpm_json: &str) -> PyResult<Vec<crate::ForwardPassMetrics>> {
+    let value: serde_json::Value = serde_json::from_str(fpm_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid FPM JSON: {e}")))?;
+    let metrics: Vec<crate::ForwardPassMetrics> = if value.is_array() {
+        serde_json::from_value(value)
+    } else {
+        serde_json::from_value(value).map(|m| vec![m])
+    }
+    .map_err(|e| PyValueError::new_err(format!("invalid FPM payload: {e}")))?;
+    Ok(metrics)
+}
+
+#[pymethods]
+impl PyForwardPassPerfModel {
+    /// Create a model from the complete canonical request.
+    #[staticmethod]
+    fn best_available(config_json: &str) -> PyResult<Self> {
+        let config = parse_forward_pass_config(config_json)?;
+        let inner = crate::ForwardPassPerfModel::best_available(config).map_err(aic_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// Expand and validate the canonical schema without constructing an engine.
+    #[staticmethod]
+    fn normalize_config(config_json: &str) -> PyResult<String> {
+        let config = parse_forward_pass_config(config_json)?
+            .resolve()
+            .map_err(aic_to_py)?;
+        serde_json::to_string(&config).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Resolve the deployment identity used by learned artifacts and checkpoints.
+    #[staticmethod]
+    fn learned_identity(config_json: &str) -> PyResult<String> {
+        let config = parse_forward_pass_config(config_json)?
+            .resolve()
+            .map_err(aic_to_py)?;
+        let identity =
+            crate::perfmodel::fpm::canonical_learned_identity(&config).map_err(aic_to_py)?;
+        serde_json::to_string(&identity).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Size declarative resources using canonical configuration, without timing
+    /// data or analytical graph construction.
+    #[staticmethod]
+    fn estimate_cache_budget(config_json: &str, budget_json: &str) -> PyResult<String> {
+        let config = parse_forward_pass_config(config_json)?;
+        let request: crate::perfmodel::FpmCacheBudgetRequest = serde_json::from_str(budget_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid cache budget: {e}")))?;
+        let estimate = config.estimate_cache_budget(&request).map_err(aic_to_py)?;
+        serde_json::to_string(&estimate).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Normalize recorded execution identity without constructing a timing model.
+    #[staticmethod]
+    fn _normalize_fpm_execution_profile(
+        model_revision: &str,
+        execution_profile_json: &str,
+    ) -> PyResult<String> {
+        let execution_profile: crate::FpmExecutionProfile =
+            serde_json::from_str(execution_profile_json).map_err(|error| {
+                PyValueError::new_err(format!("invalid FPM execution profile: {error}"))
+            })?;
+        crate::FpmExecutionBinding {
+            model_revision: model_revision.to_owned(),
+            execution_profile,
+        }
+        .selector()
+        .map_err(aic_to_py)
+    }
+
+    /// Share typed FPM option validation with the compilation adapter.
+    #[staticmethod]
+    #[pyo3(signature = (options_json, fmha_quant_mode=None, comm_quant_mode=None, has_profile=false))]
+    fn _normalize_fpm_options(
+        options_json: &str,
+        fmha_quant_mode: Option<&str>,
+        comm_quant_mode: Option<&str>,
+        has_profile: bool,
+    ) -> PyResult<String> {
+        let options: crate::FpmInterpolationConfig =
+            serde_json::from_str(options_json).map_err(|e| {
+                PyValueError::new_err(format!("invalid FPM interpolation options: {e}"))
+            })?;
+        if has_profile {
+            options.validate_profile_options().map_err(aic_to_py)?;
+        }
+        options
+            .validate_quant_modes(fmha_quant_mode, comm_quant_mode)
+            .map_err(aic_to_py)?;
+        // The compilation adapter needs resolved values, not the compact public
+        // serialization that omits defaults. Python never supplies these defaults.
+        Ok(serde_json::json!({
+            "text_only": options.text_only,
+            "fpm_parquet_path": options.fpm_parquet_path,
+            "unrecorded_quant_modes": options.unrecorded_quant_modes,
+        })
+        .to_string())
+    }
+
+    /// Migration adapter for previously saved flat tuning options.
+    #[staticmethod]
+    fn legacy_estimator_config(options_json: &str) -> PyResult<String> {
+        let options: crate::ForwardPassPerfOptions = serde_json::from_str(options_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid legacy options: {e}")))?;
+        let config = crate::EstimatorConfig::from_legacy(options).map_err(aic_to_py)?;
+        config.validate().map_err(aic_to_py)?;
+        serde_json::to_string(&config).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Translate a saved EngineConfig and flat options into the canonical schema.
+    #[staticmethod]
+    #[pyo3(signature = (config_json, worker_type, options_json=None, allow_regression=false))]
+    fn migrate_legacy_config(
+        config_json: &str,
+        worker_type: &str,
+        options_json: Option<&str>,
+        allow_regression: bool,
+    ) -> PyResult<String> {
+        let value: serde_json::Value =
+            serde_json::from_str(config_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut legacy: EngineConfig =
+            serde_json::from_value(value).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if legacy
+            .extra
+            .get("worker_type")
+            .is_some_and(|saved| saved != worker_type)
+        {
+            return Err(PyValueError::new_err(
+                "saved FPM worker_type conflicts with requested worker_type",
+            ));
+        }
+        legacy
+            .extra
+            .insert("worker_type".into(), worker_type.to_owned());
+        let mut request = engine_build_request(
+            &legacy,
+            legacy.systems_path.as_ref().and_then(|path| path.to_str()),
+        )
+        .map_err(aic_to_py)?;
+        if legacy.extra.contains_key("fpm_profile") {
+            let mut modes = Python::with_gil(|py| fpm_profile_quantization(py, &legacy))?;
+            request.gemm_quant_mode = modes.remove("gemm_quant_mode");
+            request.moe_quant_mode = modes.remove("moe_quant_mode");
+            request.fmha_quant_mode = modes.remove("fmha_quant_mode");
+            request.kvcache_quant_mode = modes.remove("kvcache_quant_mode");
+            request.comm_quant_mode = modes.remove("comm_quant_mode");
+        }
+        if request.cp_size == Some(0) {
+            return Err(PyValueError::new_err(
+                "cp_size must be a positive integer, got 0",
+            ));
+        }
+        let estimator_config = crate::EstimatorConfig::migrate_legacy_inputs(
+            legacy.extra.get("estimator_config").map(String::as_str),
+            options_json,
+            request.fpm_interpolation.as_deref(),
+            request.fpm_parquet_path.as_deref(),
+        )
+        .map_err(aic_to_py)?;
+        let worker_type = serde_json::from_value(serde_json::Value::String(worker_type.to_owned()))
+            .map_err(|e| PyValueError::new_err(format!("invalid worker_type: {e}")))?;
+        let estimation_mode = match request.forward_model.as_deref().unwrap_or("op_level") {
+            "op_level" => crate::EstimationMode::OpLevel,
+            "fpm" => crate::EstimationMode::FpmInterpolation,
+            value => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown legacy forward_model {value:?}"
+                )));
+            }
+        };
+        let config = crate::ForwardPassPerfModelConfig {
+            model: request.model_path,
+            system: request.system,
+            backend: legacy.backend,
+            worker_type,
+            backend_version: request.backend_version,
+            fpm_profile: request
+                .fpm_profile
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|e| PyValueError::new_err(format!("invalid fpm_profile: {e}")))?,
+            tp: request.tp_size,
+            pp: request.pp_size,
+            attention_dp: request.attention_dp_size,
+            dcp: request.dcp_size,
+            moe_tp_size: request.moe_tp_size,
+            moe_ep_size: request.moe_ep_size,
+            cp_size: request.cp_size,
+            gemm_quant_mode: request.gemm_quant_mode,
+            moe_quant_mode: request.moe_quant_mode,
+            fmha_quant_mode: request.fmha_quant_mode,
+            fpm_fmha_quant_mode: request.fpm_fmha_quant_mode,
+            kvcache_quant_mode: request.kvcache_quant_mode,
+            comm_quant_mode: request.comm_quant_mode,
+            nextn: request.nextn,
+            speculation: request.speculation,
+            kv_block_size: request.kv_block_size,
+            decoder_replay: request.decoder_replay,
+            estimation_mode,
+            database_mode: legacy.database_mode,
+            transfer_policy: request.transfer_policy,
+            systems_paths: legacy.systems_path.into_iter().collect(),
+            fallback_policy: if allow_regression {
+                crate::ForwardPassFallbackPolicy::LegacyRegression
+            } else {
+                crate::ForwardPassFallbackPolicy::Deny
+            },
+            estimator_config,
+            attention_backend: request.attention_backend,
+            moe_backend: request.moe_backend,
+            enable_eplb: request.enable_eplb,
+            wideep_num_slots: request.wideep_num_slots,
+            moe_kernel_source: request.moe_kernel_source,
+            enable_shared_layer: request.shared_layer,
+            strict_provenance: legacy.strict_provenance,
+            encoder_parallel: None,
+        };
+        config.validate().map_err(aic_to_py)?;
+        serde_json::to_string(&config).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    #[pyo3(signature=(bs, isl, prefix=0))]
+    fn predict_prefill_latency(
+        &self,
+        py: Python<'_>,
+        bs: u32,
+        isl: u32,
+        prefix: u32,
+    ) -> PyResult<f64> {
+        py.allow_threads(|| self.inner.predict_prefill_latency(bs, isl, prefix))
+            .map_err(aic_to_py)
+    }
+
+    /// `RustForwardPassPerfModel.from_learned(source, options_json=None)`:
+    /// offline-trained learned model. `source` is an artifact path or the
+    /// artifact JSON text (`aic_fpm_learned_forward_perf`); the artifact binds
+    /// the worker type and feature ABI. No native engine, no Python compile.
+    #[staticmethod]
+    #[pyo3(signature = (source, options_json=None))]
+    fn from_learned(source: &str, options_json: Option<&str>) -> PyResult<Self> {
+        let options = options_json
+            .map(serde_json::from_str::<crate::ForwardPassPerfOptions>)
+            .transpose()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .unwrap_or_default();
+        let inner =
+            crate::ForwardPassPerfModel::from_learned(source, options).map_err(aic_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// Ordered feature names of a learned model; `None` for other modes.
+    fn learned_feature_names(&self) -> Option<Vec<String>> {
+        self.inner
+            .learned_feature_names()
+            .map(|names| names.to_vec())
+    }
+
+    /// Trainer metadata embedded in a learned artifact as JSON; `None` for
+    /// other modes.
+    fn learned_metadata(&self) -> PyResult<Option<String>> {
+        self.inner
+            .learned_metadata()
+            .map(|value| {
+                serde_json::to_string(value)
+                    .map_err(|e| PyValueError::new_err(format!("learned metadata serialize: {e}")))
+            })
+            .transpose()
+    }
+
+    fn learned_selector_diagnostics(&self) -> PyResult<Option<String>> {
+        self.inner
+            .learned_selector_diagnostics()
+            .map(|value| {
+                serde_json::to_string(&value)
+                    .map_err(|error| PyValueError::new_err(error.to_string()))
+            })
+            .transpose()
+    }
+
+    fn learned_online_diagnostics(&self) -> PyResult<Option<String>> {
+        self.inner
+            .learned_online_diagnostics()
+            .map(|value| {
+                serde_json::to_string(&value)
+                    .map_err(|error| PyValueError::new_err(error.to_string()))
+            })
+            .transpose()
+    }
+
+    fn flush_updates(&mut self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| self.inner.flush_updates())
+            .map_err(aic_to_py)
+    }
+
+    fn export_learned_artifact(&self) -> PyResult<String> {
+        self.inner.export_learned_artifact().map_err(aic_to_py)
+    }
+
+    fn save_online_checkpoint(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        py.allow_threads(|| self.inner.save_online_checkpoint(path))
+            .map_err(aic_to_py)
+    }
+
+    /// Estimate one forward-pass iteration in ms. `fpm_json` is one iteration as
+    /// a single FPM object or a per-attention-DP-rank array. Returns `None` for
+    /// regression models without enough data yet and for learned models whose
+    /// artifact has no store for the iteration's workload kind. Pure-Rust
+    /// compute (GIL freed).
+    fn estimate_forward_pass_time_ms(
+        &self,
+        py: Python<'_>,
+        fpm_json: &str,
+    ) -> PyResult<Option<f64>> {
+        let metrics = parse_fpm_iteration(fpm_json)?;
+        py.allow_threads(|| self.inner.estimate_forward_pass_time_ms(&metrics))
+            .map_err(aic_to_py)
+    }
+
+    fn estimate_forward_pass_detailed(&self, py: Python<'_>, fpm_json: &str) -> PyResult<String> {
+        let metrics = parse_fpm_iteration(fpm_json)?;
+        let result = py
+            .allow_threads(|| self.inner.estimate_forward_pass_detailed(&metrics))
+            .map_err(aic_to_py)?;
+        serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Tune from observed FPM iterations. `iterations_json` is the nested list
+    /// `[[iter0_rank0, ...], [iter1_rank0, ...]]` (the wrapper normalizes the
+    /// convenience forms before calling). Pure-Rust compute (GIL freed).
+    fn tune_with_fpms(&mut self, py: Python<'_>, iterations_json: &str) -> PyResult<()> {
+        let iterations: Vec<Vec<crate::ForwardPassMetrics>> = serde_json::from_str(iterations_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid tuning iterations JSON: {e}")))?;
+        py.allow_threads(|| self.inner.tune_with_fpms(&iterations))
+            .map_err(aic_to_py)
+    }
+
+    /// Native static phase latency before online correction, in milliseconds.
+    fn static_phase_latency(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        input_tokens: u32,
+        output_tokens: u32,
+        prefill: bool,
+    ) -> PyResult<f64> {
+        py.allow_threads(|| {
+            self.inner
+                .static_phase_latency(batch_size, input_tokens, output_tokens, prefill)
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Static operation evidence from the canonical model, as JSON.
+    fn static_phase_diagnostics(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        context_length: u32,
+        prefix: u32,
+        prefill: bool,
+    ) -> PyResult<String> {
+        let result = py
+            .allow_threads(|| {
+                self.inner
+                    .static_phase_diagnostics(batch_size, context_length, prefix, prefill)
+            })
+            .map_err(aic_to_py)?;
+        serde_json::to_string(&result).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Per-op values of one vision-encoder call. `shapes_json` is a JSON array
+    /// of `EncoderImageShape` objects; requires an estimator compiled with
+    /// `encoder_parallel`. Pure-Rust compute (GIL freed).
+    fn vision_operations(
+        &self,
+        py: Python<'_>,
+        shapes_json: &str,
+    ) -> PyResult<Vec<(String, f64, f64, String)>> {
+        let shapes: Vec<crate::EncoderImageShape> = serde_json::from_str(shapes_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid encoder shapes JSON: {e}")))?;
+        let values = py
+            .allow_threads(|| self.inner.vision_operations(&shapes))
+            .map_err(aic_to_py)?;
+        Ok(values
+            .into_iter()
+            .map(|(name, latency_ms, energy_wms, source)| {
+                (name, latency_ms, energy_wms, source.to_owned())
+            })
+            .collect())
+    }
+
+    /// Diagnostics (source / readiness / retained count / warning) as JSON.
+    fn diagnostics(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.diagnostics())
+            .map_err(|e| PyValueError::new_err(format!("diagnostics serialize: {e}")))
+    }
+
+    /// Bounded direct-FPM native lookup evidence, or JSON null when disabled.
+    fn fpm_query_coverage(&self) -> PyResult<String> {
+        let coverage = self.inner.fpm_query_coverage().map_err(aic_to_py)?;
+        serde_json::to_string(&coverage)
+            .map_err(|error| PyValueError::new_err(format!("FPM coverage serialize: {error}")))
+    }
+
+    fn predict_prefill_latency_total(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        total_prefill_tokens: u32,
+        total_kv_read_tokens: u32,
+    ) -> PyResult<f64> {
+        py.allow_threads(|| {
+            self.inner.predict_prefill_latency_total(
+                batch_size,
+                total_prefill_tokens,
+                total_kv_read_tokens,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    fn predict_decode_latency_total(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        total_past_kv_tokens: u32,
+    ) -> PyResult<f64> {
+        py.allow_threads(|| {
+            self.inner
+                .predict_decode_latency_total(batch_size, total_past_kv_tokens)
+        })
+        .map_err(aic_to_py)
+    }
+
+    fn fpm_decode_kv_ceiling(&self, py: Python<'_>) -> PyResult<Option<u32>> {
+        py.allow_threads(|| self.inner.fpm_decode_kv_ceiling())
+            .map_err(aic_to_py)
+    }
+
+    /// Regression store labels, readiness and retained counts as JSON.
+    /// Includes cold stores; native AIC models return an empty list.
+    fn regression_store_diagnostics(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.regression_store_diagnostics()).map_err(|e| {
+            PyValueError::new_err(format!("regression store diagnostics serialize: {e}"))
+        })
+    }
+
+    /// Smallest ready native correction factor; `None` until a bucket is ready.
+    fn min_correction_factor(&self) -> Option<f64> {
+        self.inner.min_correction_factor()
+    }
+
+    /// Largest ready native correction factor; `None` until a bucket is ready.
+    fn max_correction_factor(&self) -> Option<f64> {
+        self.inner.max_correction_factor()
+    }
+
+    /// Mean ready native correction factor; `None` until a bucket is ready.
+    fn avg_correction_factor(&self) -> Option<f64> {
+        self.inner.avg_correction_factor()
+    }
+}
+
+/// Register the AIConfigurator compatibility surface on the unified
+/// `aisimulate._runtime` extension. Python's
+/// `aisimulate_core._native` module is a pure-Python shim that
+/// re-exports these objects from that canonical extension.
+///
+/// The removed `build_aic_engine` flat adapter is intentionally not exposed;
+/// embedded callers use `AicEngineBuilder`.
+pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(_build_smoke, m)?)?;
+    m.add_function(wrap_pyfunction!(engine_spec_bincode_from_json, m)?)?;
+    m.add_function(wrap_pyfunction!(engine_spec_json_from_bincode, m)?)?;
+    m.add_function(wrap_pyfunction!(weights_ops_json, m)?)?;
+    m.add_function(wrap_pyfunction!(gemm_quant_util_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(moe_quant_util_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(table_view_attributes, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_op_sources_report_json, m)?)?;
+    m.add_function(wrap_pyfunction!(ops_json_from_ops, m)?)?;
+    m.add_function(wrap_pyfunction!(engine_spec_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(op_from_spec_json, m)?)?;
+    m.add_function(wrap_pyfunction!(glm53_cache_bytes, m)?)?;
+    m.add_class::<AicEngine>()?;
+    m.add_class::<PyForwardPassPerfModel>()?;
+    crate::perfmodel::py_ops::register(m)?;
+    Ok(())
+}
+
+#[cfg(all(test, feature = "embed-python"))]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
+    use crate::operators::op::Op;
+    use crate::operators::{ContextAttentionOp, ElementwiseOp, GemmOp, GenerationAttentionOp};
+    use crate::perfmodel::EngineConfig;
+    use crate::perfmodel::engine::spec::EngineSpec;
+    use crate::{BackendKind, ParallelMapping, QuantizationConfig};
+
+    fn systems_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python/aisimulate/src/aisimulate_core/systems")
+    }
+
+    /// `cargo test` runs without an embedding host, so the interpreter must
+    /// be initialized before any `Python::with_gil` (pyo3's
+    /// `auto-initialize` feature is intentionally off for the extension
+    /// build). Idempotent.
+    fn py_init() {
+        pyo3::prepare_freethreaded_python();
+    }
+
+    #[test]
+    fn w4a16_nvfp4_wire_dtype_maps_to_distinct_gemm_mode() {
+        assert_eq!(
+            gemm_quant_name(Some(&DataType::W4a16Nvfp4)),
+            Some("w4a16_nvfp4")
+        );
+        assert_ne!(
+            gemm_quant_name(Some(&DataType::W4a16Nvfp4)),
+            gemm_quant_name(Some(&DataType::Int4))
+        );
+        assert_eq!(
+            moe_quant_name(Some(&DataType::W4a16Nvfp4)),
+            Some("w4a16_nvfp4")
+        );
+        assert_ne!(
+            moe_quant_name(Some(&DataType::W4a16Nvfp4)),
+            moe_quant_name(Some(&DataType::Int4))
+        );
+    }
+
+    const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
+
+    /// Hand-built context op list against the b200_sxm/vllm/0.24.0 perf tables.
+    /// `Elementwise` is DB-free (pure mem-bandwidth SOL); `Gemm` and
+    /// `ContextAttention` hit `gemm_perf` / `context_attention_perf`, both of
+    /// which exist for this fixture. Mirrors a MiniMax-shaped context graph
+    /// closely enough to exercise the binding/runtime orchestration without
+    /// rebuilding the (deleted) model layer.
+    fn context_ops() -> Vec<Op> {
+        vec![
+            Op::Elementwise(ElementwiseOp {
+                name: "rmsnorm".into(),
+                scale_factor: 1.0,
+                bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
+                seq_split: 1,
+            }),
+            Op::Gemm(GemmOp {
+                name: "qkv_gemm".into(),
+                scale_factor: 1.0,
+                n: 4096,
+                k: 4096,
+                quant_mode: GemmQuantMode::Fp8Block,
+                scale_num_tokens: 0,
+                low_precision_input: false,
+                seq_split: 1,
+                below_grid_sol: false,
+            }),
+            Op::ContextAttention(ContextAttentionOp {
+                name: "context_attention".into(),
+                scale_factor: 1.0,
+                n: 32,
+                n_kv: 8,
+                head_size: 128,
+                window_size: 0,
+                kv_cache_dtype: KvCacheQuantMode::Fp8,
+                fmha_quant_mode: FmhaQuantMode::Bfloat16,
+                use_qk_norm: false,
+                cp_size: 1,
+                lane_order: crate::operators::attention::b200_vllm_context_lane_order(),
+                apply_rope: true,
+                dcp_size: 1,
+            }),
+        ]
+    }
+
+    /// Hand-built generation op list. `GenerationAttention` hits
+    /// `generation_attention_perf`, which exists for the fixture.
+    fn generation_ops() -> Vec<Op> {
+        vec![
+            Op::Elementwise(ElementwiseOp {
+                name: "rmsnorm".into(),
+                scale_factor: 1.0,
+                bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
+                seq_split: 1,
+            }),
+            Op::GenerationAttention(GenerationAttentionOp {
+                name: "generation_attention".into(),
+                scale_factor: 1.0,
+                n: 32,
+                n_kv: 8,
+                head_size: 128,
+                window_size: 0,
+                kv_cache_dtype: KvCacheQuantMode::Fp8,
+                lane_order: crate::operators::attention::b200_vllm_generation_lane_order(),
+                use_qk_norm: false,
+                scale_num_tokens: 1,
+                verify_query_tokens: 0,
+                dcp_size: 1,
+            }),
+        ]
+    }
+
+    fn fixture_engine_config() -> EngineConfig {
+        EngineConfig {
+            schema_version: crate::ENGINE_CONFIG_SCHEMA_VERSION,
+            model_name: TEST_MODEL.to_string(),
+            system_name: "b200_sxm".to_string(),
+            systems_path: None,
+            backend: BackendKind::Vllm,
+            backend_version: Some("0.24.0".to_string()),
+            forward_model: None,
+            fpm_parquet_path: None,
+            decoder_replay: false,
+            moe_kernel_source: None,
+            kv_block_size: None,
+            parallel: ParallelMapping {
+                dcp_size: None,
+                tp_size: 8,
+                pp_size: 1,
+                attention_dp_size: Some(1),
+                moe_tp_size: Some(1),
+                moe_ep_size: Some(8),
+                cp_size: None,
+            },
+            quantization: QuantizationConfig {
+                weight_dtype: None,
+                moe_dtype: None,
+                activation_dtype: None,
+                fpm_fmha_dtype: None,
+                kv_cache_dtype: None,
+            },
+            speculative: None,
+            enable_shared_layer: None,
+            strict_provenance: false,
+            tolerate_dirless_version: false,
+            database_mode: Default::default(),
+            transfer_policy: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_compilation_with_only_correction_controls_keeps_default_method() {
+        py_init();
+        let mut config = fixture_engine_config();
+        config.extra.insert(
+            "estimator_config".into(),
+            r#"{"correction":{"enabled":false},"fpm_interpolation":{"text_only":false,"unrecorded_quant_modes":[]}}"#.into(),
+        );
+        for forward_model in [None, Some("fpm".to_owned())] {
+            config.forward_model = forward_model;
+            compile_engine_to_engine(&config, systems_root().to_str()).unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_engine_rejects_invalid_fpm_paths() {
+        for path in ["", "/missing/fpm.parquet"] {
+            let mut config = fixture_engine_config();
+            config.fpm_parquet_path = Some(path.into());
+            let result = compile_engine_to_engine(&config, None);
+            assert!(
+                matches!(result, Err(AicError::InvalidEngineConfig(message)) if message.contains("fpm_parquet_path"))
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_compilation_rejects_conflicting_interpolation_before_entering_python() {
+        for (canonical, legacy) in [("auto", "direct"), ("direct", "auto"), ("sol", "direct")] {
+            let mut config = fixture_engine_config();
+            config.extra.insert(
+                "estimator_config".into(),
+                format!(r#"{{"fpm_interpolation": {{"method": "{canonical}"}}}}"#),
+            );
+            config
+                .extra
+                .insert("fpm_interpolation".into(), legacy.into());
+            let error = compile_engine_to_engine(&config, None)
+                .err()
+                .expect("conflicting interpolation methods");
+            assert!(
+                error.to_string().contains(
+                    "conflicting explicit values for estimator_config.fpm_interpolation.method"
+                ),
+                "{error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_model_rejects_non_utf8_fpm_path() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut config = crate::ForwardPassPerfModelConfig::new(
+            TEST_MODEL,
+            "b200_sxm",
+            BackendKind::Vllm,
+            crate::ForwardPassWorkerType::Aggregated,
+        );
+        config.estimator_config.fpm_interpolation.fpm_parquet_path =
+            Some(std::ffi::OsString::from_vec(b"/data/invalid-\xff.parquet".to_vec()).into());
+        let result = crate::ForwardPassPerfModel::best_available(config);
+        assert!(
+            matches!(result, Err(AicError::InvalidEngineConfig(message)) if message.contains("fpm_parquet_path must be valid UTF-8"))
+        );
+    }
+
+    /// Build bincoded `EngineSpec` bytes from hand-built op lists. The lists
+    /// query the real b200_sxm/vllm/0.24.0 perf tables so the binding
+    /// pass-through numbers are real, not synthetic.
+    fn fixture_spec_bytes() -> Vec<u8> {
+        let spec = EngineSpec::new(fixture_engine_config(), context_ops(), generation_ops());
+        spec.to_bincode().unwrap()
+    }
+
+    /// The binding layer must be a faithful pass-through: an `AicEngine` built
+    /// from spec bytes via `from_spec` must produce the SAME numbers as a raw
+    /// `Engine` built from the same bytes via `from_spec_bytes`.
+    #[test]
+    fn aic_engine_matches_raw_engine() {
+        py_init();
+        let bytes = fixture_spec_bytes();
+        let root = systems_root();
+
+        let raw = Engine::from_spec_bytes(&bytes, &root).unwrap();
+        let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
+
+        // run_static (Both): tuple from the binding == StaticResult from raw.
+        let rt = RuntimeConfig {
+            batch_size: 1,
+            isl: 1024,
+            osl: 8,
+            ..Default::default()
+        };
+        let raw_static = raw
+            .run_static(&rt, StaticMode::Both, DEFAULT_STATIC_STRIDE)
+            .unwrap();
+        // Positional order: (bs, beam, isl, osl, prefix, seq_corr, gen_seq_corr, mode, stride).
+        let (ctx, generation, total) = Python::with_gil(|py| {
+            aic.run_static(
+                py,
+                1,
+                1,
+                1024,
+                8,
+                0,
+                1.0,
+                1.0,
+                "static",
+                DEFAULT_STATIC_STRIDE,
+            )
+        })
+        .unwrap();
+        assert!((ctx - raw_static.context_ms).abs() < 1e-12);
+        assert!((generation - raw_static.generation_ms).abs() < 1e-12);
+        assert!((total - raw_static.total_ms).abs() < 1e-12);
+
+        // predict_prefill_latency == raw Context-mode total.
+        let raw_prefill = raw
+            .run_static(
+                &RuntimeConfig {
+                    batch_size: 2,
+                    isl: 1024,
+                    osl: 1,
+                    prefix: 0,
+                    ..Default::default()
+                },
+                StaticMode::Context,
+                DEFAULT_STATIC_STRIDE,
+            )
+            .unwrap()
+            .total_ms;
+        let prefill = Python::with_gil(|py| aic.predict_prefill_latency(py, 2, 1024, 0)).unwrap();
+        assert!((prefill - raw_prefill).abs() < 1e-12);
+
+        // predict_decode_latency (osl=2) == raw Generation-mode total.
+        let raw_decode = raw
+            .run_static(
+                &RuntimeConfig {
+                    batch_size: 4,
+                    isl: 1024,
+                    osl: 2,
+                    ..Default::default()
+                },
+                StaticMode::Generation,
+                DEFAULT_STATIC_STRIDE,
+            )
+            .unwrap()
+            .total_ms;
+        let decode = Python::with_gil(|py| aic.predict_decode_latency(py, 4, 1024, 2)).unwrap();
+        assert!((decode - raw_decode).abs() < 1e-12);
+    }
+
+    /// `mode` string mapping must match the Rust `StaticMode` semantics, and an
+    /// unknown mode must raise (not silently default).
+    #[test]
+    fn mode_strings_map_correctly() {
+        py_init();
+        let bytes = fixture_spec_bytes();
+        let root = systems_root();
+        let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
+
+        // Positional order: (bs, beam, isl, osl, prefix, seq_corr, gen_seq_corr, mode, stride).
+        Python::with_gil(|py| {
+            let ctx_only = aic
+                .run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "static_ctx", 32)
+                .unwrap();
+            assert!(ctx_only.0 > 0.0 && ctx_only.1 == 0.0);
+
+            let gen_only = aic
+                .run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "static_gen", 32)
+                .unwrap();
+            assert!(gen_only.0 == 0.0 && gen_only.1 > 0.0);
+
+            assert!(
+                aic.run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "bogus", 32)
+                    .is_err()
+            );
+        });
+    }
+
+    /// `mixed_step_latency` / `decode_step_latency` bindings must pass through
+    /// the raw `Engine` numbers unchanged.
+    #[test]
+    fn per_step_bindings_match_raw_engine() {
+        py_init();
+        let bytes = fixture_spec_bytes();
+        let root = systems_root();
+        let raw = Engine::from_spec_bytes(&bytes, &root).unwrap();
+        let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
+
+        let raw_mixed = raw
+            .mixed_step_latency(1024, 2, 1024, 8, 0, 1.0, 1.0)
+            .unwrap();
+        let mixed =
+            Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0))
+                .unwrap();
+        assert!((mixed - raw_mixed).abs() < 1e-12);
+        let raw_breakdown = raw
+            .mixed_step_breakdown(1024, 2, 1024, 8, 0, 1.0, 1.0)
+            .unwrap();
+        let breakdown =
+            Python::with_gil(|py| aic.mixed_step_breakdown(py, 1024, 2, 1024, 8, 0, 1.0, 1.0))
+                .unwrap();
+        assert_eq!(
+            breakdown,
+            (
+                raw_breakdown[0],
+                raw_breakdown[1],
+                raw_breakdown[2],
+                raw_breakdown[3],
+            )
+        );
+
+        let raw_decode = raw.decode_step_latency(4, 1024, 8, 1.0).unwrap();
+        let decode = Python::with_gil(|py| aic.decode_step_latency(py, 4, 1024, 8, 1.0)).unwrap();
+        assert!((decode - raw_decode).abs() < 1e-12);
+    }
+
+    /// `engine_spec_bincode_from_json` round-trips: JSON → bincode → decoded
+    /// `EngineSpec` equals the original spec.
+    #[test]
+    fn engine_spec_json_to_bincode_round_trips() {
+        let bytes = fixture_spec_bytes();
+        let original = EngineSpec::from_bincode(&bytes).unwrap();
+        let json = serde_json::to_string(&original).unwrap();
+        let out = engine_spec_bincode_from_json(&json).unwrap();
+        let decoded = EngineSpec::from_bincode(&out).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    /// Pure-Rust inherent `prefill_latency_ms` / `decode_latency_ms` (no `py`
+    /// token) must match the raw `Engine` predict methods — this is the
+    /// GIL-free Mocker hot path surface that `tests/embedded_round_trip.rs`
+    /// exercises end-to-end.
+    #[test]
+    fn inherent_predict_matches_raw_engine() {
+        py_init();
+        let bytes = fixture_spec_bytes();
+        let root = systems_root();
+        let raw = Engine::from_spec_bytes(&bytes, &root).unwrap();
+        let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
+
+        let raw_prefill = raw.predict_prefill_latency(2, 1024, 0).unwrap();
+        let aic_prefill = aic.prefill_latency_ms(2, 1024, 0).unwrap();
+        assert!((aic_prefill - raw_prefill).abs() < 1e-12);
+        assert!(aic_prefill > 0.0 && aic_prefill.is_finite());
+
+        let raw_decode = raw.predict_decode_latency(4, 1024, 2).unwrap();
+        let aic_decode = aic.decode_latency_ms(4, 1024, 2).unwrap();
+        assert!((aic_decode - raw_decode).abs() < 1e-12);
+        assert!(aic_decode > 0.0 && aic_decode.is_finite());
+    }
+
+    /// `aic_to_py` must raise the canonical sdk exception classes for the
+    /// typed variants when the sdk is importable, and degrade to `ValueError`
+    /// when it is not (pure-Rust test contexts). Everything else stays
+    /// `ValueError` unconditionally.
+    #[test]
+    fn aic_to_py_maps_typed_errors_to_sdk_classes() {
+        py_init();
+        Python::with_gil(|py| {
+            let sdk_available = py.import("aisimulate_core.sdk.errors").is_ok();
+
+            let check = |err: AicError, sdk_name: &str| {
+                let pyerr = aic_to_py(err);
+                let type_name = pyerr.get_type(py).name().unwrap().to_string();
+                if sdk_available {
+                    assert_eq!(type_name, sdk_name);
+                } else {
+                    assert_eq!(type_name, "ValueError");
+                }
+            };
+            check(
+                AicError::PerfDatabase("missing table".to_string()),
+                "PerfDataNotAvailableError",
+            );
+            check(
+                AicError::Io {
+                    path: PathBuf::from("/nope"),
+                    source: std::io::Error::new(std::io::ErrorKind::NotFound, "nope"),
+                },
+                "PerfDataNotAvailableError",
+            );
+            check(
+                AicError::EmpiricalNotImplemented("no basis".to_string()),
+                "EmpiricalNotImplementedError",
+            );
+            check(
+                AicError::MissingSystemFlops("no fp4 throughput".to_string()),
+                "MissingSystemFlopsError",
+            );
+            check(
+                AicError::SolNotImplemented("no SOL decomposition".to_string()),
+                "SolNotImplementedError",
+            );
+
+            // Non-typed variants stay ValueError regardless of the sdk.
+            let other = aic_to_py(AicError::InvalidEngineConfig("bad".to_string()));
+            assert_eq!(other.get_type(py).name().unwrap().to_string(), "ValueError");
+
+            // The message survives the mapping.
+            let msg_err = aic_to_py(AicError::PerfDatabase("missing table xyz".to_string()));
+            assert!(msg_err.value(py).to_string().contains("missing table xyz"));
+        });
+    }
+
+    /// Compute bindings reset the provenance accumulator on entry, and
+    /// `last_provenance` reads it back (None == pure silicon). The silicon
+    /// fixture fires no empirical path, so a pre-seeded tier must be cleared
+    /// by the next compute call.
+    #[test]
+    fn compute_bindings_reset_provenance_per_call() {
+        use crate::operators::util_empirical::ProvenanceTier;
+
+        py_init();
+        let bytes = fixture_spec_bytes();
+        let root = systems_root();
+        let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
+
+        assert_eq!(aic.last_provenance(), None);
+        aic.inner.database().note_provenance(ProvenanceTier::XOp);
+        assert_eq!(aic.last_provenance(), Some("xop"));
+
+        // Positional order: (bs, beam, isl, osl, prefix, seq_corr, gen_seq_corr, mode, stride).
+        Python::with_gil(|py| {
+            aic.run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "static", 32)
+                .unwrap();
+        });
+        assert_eq!(aic.last_provenance(), None);
+
+        aic.inner
+            .database()
+            .note_provenance(ProvenanceTier::Empirical);
+        Python::with_gil(|py| {
+            aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0)
+                .unwrap();
+        });
+        assert_eq!(aic.last_provenance(), None);
+
+        aic.inner.database().note_provenance(ProvenanceTier::XShape);
+        Python::with_gil(|py| {
+            aic.decode_step_latency(py, 4, 1024, 8, 1.0).unwrap();
+        });
+        assert_eq!(aic.last_provenance(), None);
+    }
+}

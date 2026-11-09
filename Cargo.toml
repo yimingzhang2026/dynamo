@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
+exclude = ["vendor/aisimulate-core"]
 members = [
     "lib/llm",
     "lib/rl",
@@ -218,3 +219,7 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Keep scheduler statistics incremental in every native replay consumer.
+[patch.crates-io]
+aisimulate-core = { path = "vendor/aisimulate-core" }

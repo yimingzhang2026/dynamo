@@ -1,0 +1,271 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Replay-owned values that cross workload, placement, reporting, and engine
+//! adapter boundaries.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use uuid::Uuid;
+
+use crate::engine::ImageSpec;
+
+/// Stable Agentic correlation data carried across replay-owned boundaries.
+///
+/// The static graph already owns request, play, and conversation identity.
+/// Later replay phases may populate lane, tree, parent, and cache identities
+/// without changing the placement or engine request contracts again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgenticRuntimeIdentity {
+    pub request_id: String,
+    pub play_id: String,
+    pub conversation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_id: Option<String>,
+}
+
+/// Where the prompt token identities carried by a lowered request came from.
+///
+/// Length-only specifications still need deterministic token identities for
+/// scheduler execution. Those synthetic identities are deliberately
+/// marked so a KV-aware placement adapter cannot mistake them for authored
+/// prompt content.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayPromptTokenSource {
+    /// The workload supplied exact prompt token IDs (or an equivalent trace
+    /// representation suitable for KV-aware placement).
+    #[default]
+    Materialized,
+    /// Replay synthesized deterministic execution-only IDs from a prompt
+    /// length. These IDs must not be used to model prefix-cache affinity.
+    LengthOnlySynthetic,
+}
+
+/// Replay-owned correlation data retained while a request crosses placement,
+/// engine, and reporting boundaries.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReplayRequestContext {
+    /// Source request ID, when supplied; empty for session-only ingress metadata.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub authored_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(default)]
+    pub prompt_token_source: ReplayPromptTokenSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agentic: Option<AgenticRuntimeIdentity>,
+}
+
+impl ReplayRequestContext {
+    /// Effective serving identity, matching Dynamo's backend normalization.
+    /// Missing or whitespace-only IDs do not label routing or engine events.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+}
+
+/// Authored `kv.fetch` hint naming the rank that holds a prefix of a request's
+/// prompt, as when a client attaches a hint directly.
+///
+/// The source is named by its logical worker and attention-DP rank. A
+/// placement policy resolves it to a scheduler id in its own topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoredKvHints {
+    /// Logical worker that holds the prefix.
+    pub source_worker: usize,
+    /// Attention-DP rank of that worker.
+    pub source_dp_rank: u32,
+}
+
+/// One materialized replay request before it enters a generalized engine.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DirectRequest {
+    pub tokens: Vec<u32>,
+    pub max_output_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<u32>>,
+    pub uuid: Option<Uuid>,
+    pub dp_rank: u32,
+    /// Optional rank requested by the authored ReplaySpec. The runtime-owned
+    /// `dp_rank` remains the effective rank used by legacy workload DTOs;
+    /// placement policies may choose whether to honor this preference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_dp_rank: Option<u32>,
+    /// Optional disaggregated-prefill override. The decode/aggregated preference above is the
+    /// fallback when this is absent, matching Dynamo's request-routing contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_prefill_dp_rank: Option<u32>,
+    /// Optional authored peer-fetch hint, as `ReplayRequest::kv_hints` describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_hints: Option<AuthoredKvHints>,
+    pub arrival_timestamp_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub priority: i32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub strict_priority: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_class: Option<String>,
+    /// Replay identity and provenance. The engine adapter forwards its session ID
+    /// to the native request; the remaining context stays in Replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_context: Option<ReplayRequestContext>,
+    /// Image placeholders inside `tokens`; empty for text-only requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageSpec>,
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+impl DirectRequest {
+    pub fn request_id(&self) -> Option<Uuid> {
+        self.uuid
+    }
+
+    pub fn input_tokens(&self) -> &[u32] {
+        &self.tokens
+    }
+
+    pub fn max_output_tokens(&self) -> usize {
+        self.max_output_tokens
+    }
+
+    /// Effective output length after applying an authored exact token plan.
+    #[inline]
+    pub fn effective_max_output_tokens(&self) -> usize {
+        self.output_token_ids
+            .as_ref()
+            .map_or(self.max_output_tokens, Vec::len)
+    }
+
+    pub(crate) fn clone_with_output_limit(&self, limit: usize) -> Self {
+        let max_output_tokens = self.effective_max_output_tokens().min(limit);
+        let mut request = self.clone();
+        request.max_output_tokens = max_output_tokens;
+        request.output_token_ids = self
+            .output_token_ids
+            .as_ref()
+            .map(|ids| ids[..max_output_tokens].to_vec());
+        request
+    }
+
+    pub fn arrival_time_ms(&self) -> Option<f64> {
+        self.arrival_timestamp_ms
+    }
+
+    pub fn preferred_dp_rank(&self) -> Option<u32> {
+        self.preferred_dp_rank
+    }
+
+    pub fn router_priorities(&self) -> (f64, u32) {
+        (f64::from(self.priority.max(0)), self.strict_priority)
+    }
+
+    pub fn policy_class(&self) -> Option<&str> {
+        self.policy_class.as_deref()
+    }
+
+    pub fn prompt_tokens_are_placement_safe(&self) -> bool {
+        self.replay_context.as_ref().is_none_or(|context| {
+            context.prompt_token_source != ReplayPromptTokenSource::LengthOnlySynthetic
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DirectRequest;
+
+    #[test]
+    fn output_plan_is_authoritative_when_limited() {
+        let request = DirectRequest {
+            tokens: vec![1, 2],
+            max_output_tokens: 0,
+            output_token_ids: Some(vec![7, 8]),
+            ..Default::default()
+        };
+
+        assert_eq!(request.effective_max_output_tokens(), 2);
+        let limited = request.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 1);
+        assert_eq!(limited.output_token_ids.as_deref(), Some(&[7][..]));
+        assert_eq!(limited.output_token_ids.unwrap().capacity(), 1);
+        assert_eq!(request.output_token_ids.as_deref(), Some(&[7, 8][..]));
+
+        let empty_plan = DirectRequest {
+            max_output_tokens: 4,
+            output_token_ids: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert_eq!(empty_plan.effective_max_output_tokens(), 0);
+        let limited = empty_plan.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 0);
+        assert_eq!(limited.output_token_ids.as_deref(), Some(&[][..]));
+
+        let unplanned = DirectRequest::default();
+        assert_eq!(unplanned.effective_max_output_tokens(), 0);
+        let limited = unplanned.clone_with_output_limit(1);
+        assert_eq!(limited.max_output_tokens, 0);
+        assert!(limited.output_token_ids.is_none());
+    }
+}
+
+/// Client-visible output released at a replay pass-completion boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OutputSignal {
+    pub(crate) uuid: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) token_id: Option<u32>,
+    pub(crate) completed: bool,
+    #[serde(default)]
+    pub(crate) rejected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) handoff_delay_ms: Option<f64>,
+    /// Prompt tokens served from KV cache at first admission. Present only on
+    /// the request's first output signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cached_tokens: Option<usize>,
+}
+
+/// Replay-neutral forward-pass observation consumed by scaling policies.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ForwardPassSnapshot {
+    pub version: u32,
+    pub worker_id: String,
+    pub dp_rank: u32,
+    pub counter_id: u64,
+    pub num_prefill_requests: u32,
+    pub sum_prefill_tokens: u64,
+    pub var_prefill_length: f64,
+    pub sum_prefill_kv_tokens: u64,
+    pub num_decode_requests: u32,
+    pub sum_decode_kv_tokens: u64,
+    pub var_decode_kv_tokens: f64,
+    pub num_queued_prefill: u32,
+    pub sum_queued_prefill_tokens: u64,
+    pub var_queued_prefill_length: f64,
+    pub num_queued_decode: u32,
+    pub sum_queued_decode_kv_tokens: u64,
+    pub var_queued_decode_kv_tokens: f64,
+    pub wall_time_secs: f64,
+}
