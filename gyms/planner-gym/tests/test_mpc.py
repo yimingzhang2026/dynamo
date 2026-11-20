@@ -44,7 +44,7 @@ def test_ais_queries_use_deployed_pool_identity(monkeypatch, disagg):
 
         def decode(**kwargs):
             queried.append(("decode", config["worker_type"], config["tp"]))
-            return 16.0
+            return 15.0  # AIS totals the osl - 1 = 15 steps after the first token
 
         return SimpleNamespace(predict_prefill=prefill, predict_decode=decode)
 
@@ -62,6 +62,25 @@ def test_ais_queries_use_deployed_pool_identity(monkeypatch, disagg):
         ("prefill", prefill_config["worker_type"], prefill_config["tp"]),
         ("decode", decode_config["worker_type"], decode_config["tp"]),
     ]
+
+
+def test_ais_step_time_and_capacity_count_the_steps_after_the_first_token(
+    monkeypatch,
+):
+    """A 16-token output is 15 decode steps: 780 ms of generation is 52 ms a step."""
+
+    def create_session(config):
+        return SimpleNamespace(
+            predict_prefill=lambda **kwargs: 100.0,
+            predict_decode=lambda **kwargs: 780.0,
+        )
+
+    monkeypatch.setattr("dynamo._internal.ais.create_session", create_session)
+    model = AISCapacityModel({"worker_type": "aggregated"}, max_num_seqs=1)
+    assert model.decode_step_ms(1, 256, 16) == pytest.approx(52.0)
+    # One request at a time: 100 ms prefill plus the 780 ms the 15 steps take.
+    assert model.residence_s(1, 256, 16, 0.0) == pytest.approx(0.88)
+    assert model.service_rate(1.0, 256, 16) == pytest.approx(1 / 0.88)
 
 
 class _LinearCapacityModel(CapacityModel):
@@ -185,6 +204,26 @@ def test_aggregate_downsize_checks_itl_even_with_low_utilization_and_ttft():
     assert not mpc._downsize_feasible([1.0], 0, 1)
 
 
+def test_aggregate_downsize_checks_the_wait_of_requests_already_queued():
+    class FlatItl(_LinearCapacityModel):
+        def itl_ms(self, load_per_worker, isl, osl, kv_hit_rate, *, saturated=False):
+            return 30.0
+
+    mpc = _mpc(FlatItl(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=0)
+    mpc._ready = mpc._expected = mpc._current_replicas = 2
+    mpc._isl_now, mpc._osl_ema = 500.0, 40.0
+    mu = mpc._mu(1.0, 1)  # one worker serves about 50 requests/s
+    assert 1.0 < 0.75 * mu
+    # Sixty waiting requests clear within the first step, so the wait at its
+    # end is only the prefill, but they themselves wait past half the limit.
+    plan = mpc._queue_plan([1.0], 60, 1)
+    assert plan[0][0] == 0 and plan[0][1] < mpc._slo_ttft * 0.5
+    assert plan[0][4] > mpc._slo_ttft * 0.5
+    assert not mpc._downsize_feasible([1.0], 60, 1)
+    # An empty queue still allows the reduction.
+    assert mpc._downsize_feasible([1.0], 0, 1)
+
+
 @pytest.mark.parametrize("mode,p,d", [("agg", 0, 2), ("disagg", 2, 1)])
 def test_mpc_uses_measured_goodput_per_resident_gpu_second(mode, p, d):
     mpc = _mpc(
@@ -213,7 +252,7 @@ def test_mpc_uses_measured_goodput_per_resident_gpu_second(mode, p, d):
     if mode == "agg":
         mpc._update_rho(100, 0)
     else:
-        mpc._update_rho_disagg(100, 0)
+        mpc._update_rho_disagg(100, (0, 0))
     assert mpc._rho == pytest.approx(20 / 120)
     assert mpc._observed_outcomes["good_rate"] == 0.2
 
@@ -384,6 +423,83 @@ def test_reconcile_books_unknown_starting_workers_and_retires_ready_ones():
     assert mpc.pending_orders == 2 and mpc._orders[0][0] == pytest.approx(40.0)
     mpc._reconcile_orders(45.0, ready=2, expected=3)  # one came up
     assert mpc.pending_orders == 1
+
+
+def test_late_worker_is_not_counted_as_serving_until_reported_ready():
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
+    mpc._reconcile_orders(100.0, ready=1, expected=1)
+    mpc._book_decision(100.0, 2)  # booked for t=130
+    # Due at this tick: it serves from the first step.
+    mpc._reconcile_orders(130.0, ready=1, expected=2)
+    assert mpc._active_schedule(2)[:2] == [2, 2]
+    # Five seconds late and still starting: only the ready worker serves now.
+    mpc._reconcile_orders(135.0, ready=1, expected=2)
+    assert mpc.pending_orders == 1
+    assert mpc._active_schedule(2)[:3] == [1, 2, 2]
+    # Still starting a tick later: the current step again has one worker.
+    mpc._reconcile_orders(140.0, ready=1, expected=2)
+    assert mpc._active_schedule(2)[:3] == [1, 2, 2]
+    # Reported ready: the order retires and both workers serve.
+    mpc._reconcile_orders(145.0, ready=2, expected=2)
+    assert mpc.pending_orders == 0
+    assert mpc._active_schedule(2)[0] == 2
+
+
+def test_late_worker_rule_applies_to_each_disaggregated_pool():
+    mpc = _mpc(
+        _LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS),
+        mode="disagg",
+        cold_start_s=30.0,
+    )
+    book = mpc._book_p
+    book.reconcile(100.0, 1, 1)
+    book.book(100.0, 3)  # two prefill workers booked for t=130
+    book.reconcile(130.0, 1, 3)
+    assert book.schedule(3)[:2] == [3, 3]
+    book.reconcile(135.0, 1, 3)
+    assert book.pending == 2
+    assert book.schedule(3)[:3] == [1, 3, 3]
+    # One came up, one is still late.
+    book.reconcile(140.0, 2, 3)
+    assert book.pending == 1
+    assert book.schedule(3)[:3] == [2, 3, 3]
+
+
+def test_plan_serves_nothing_while_no_worker_is_ready():
+    mpc = _mpc(_LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), cold_start_s=30.0)
+    mpc._isl_now, mpc._osl_ema = 500.0, 40.0
+    mpc._reconcile_orders(0.0, ready=0, expected=1)  # the only worker is starting
+    assert mpc.pending_orders == 1
+    schedule = mpc._active_schedule(1)
+    assert schedule[:6] == [0] * 6 and schedule[6:] == [1] * 5
+    plan = mpc._queue_plan([2.0] * mpc._plan_steps, 0, 1)
+    # Nothing completes before the worker is due; arrivals accumulate.
+    assert [step[2] for step in plan[:6]] == [0] * 6
+    assert plan[5][0] == pytest.approx(2.0 * 30.0)
+    assert plan[6][2] > 0
+    assert not mpc._downsize_feasible([0.0] * mpc._plan_steps, 0, 1)
+    # The model-based efficiency estimate sees no completions either.
+    mpc._update_rho(2.0, 0)
+    assert mpc._good_ema == 0
+
+
+def test_disaggregated_plan_serves_nothing_while_a_pool_has_no_ready_worker():
+    mpc = _mpc(
+        _LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS),
+        mode="disagg",
+        cold_start_s=30.0,
+    )
+    mpc._isl_now, mpc._osl_ema = 500.0, 40.0
+    mpc._book_p.reconcile(0.0, 1, 1)
+    mpc._book_d.reconcile(0.0, 0, 1)  # the only decode worker is starting
+    assert mpc._book_d.schedule(1)[:7] == [0] * 6 + [1]
+    steps = mpc._plan_steps
+    plan = mpc._plan_disagg([2.0] * steps, (0, 0), 1, 1)
+    assert [step[2] for step in plan[:6]] == [0] * 6
+    assert plan[6][2] > 0
+    assert not mpc._feasible_disagg([0.0] * steps, (0, 0), 1, 1)
+    mpc._update_rho_disagg(2.0, (0, 0))
+    assert mpc._good_ema == 0
 
 
 def test_queue_spike_floor_does_not_wind_up_while_orders_are_in_flight():
@@ -612,10 +728,10 @@ def test_disagg_pool_capacities_follow_their_binding_resources():
     assert mpc._mu_prefill() == pytest.approx(
         1000 / (135 + mpc._kv_transfer_ms()), rel=1e-6
     )
-    # decode: c_sat / (osl * T_d(c_sat)) -- KV-bound, far below prefill capacity here
+    # decode: c_sat / ((osl - 1) * T_d(c_sat)) -- KV-bound, far below prefill capacity here
     c = mpc._capacity.saturated_concurrency(4500, 1680)
     assert mpc._mu_decode() == pytest.approx(
-        c / (1680 * (5 + 0.1 * c) / 1000), rel=1e-6
+        c / (1679 * (5 + 0.1 * c) / 1000), rel=1e-6
     )
     assert mpc._mu_decode() < mpc._mu_prefill()
 
@@ -640,6 +756,51 @@ def test_disagg_sizes_pools_independently_on_a_prefill_backlog():
     d = asyncio.run(mpc.tick(tick, ti)).scale_to
     assert d.num_prefill >= 2
     assert d.num_decode == 1, (d.num_prefill, d.num_decode)
+
+
+def test_disagg_plan_drains_each_stage_at_its_own_capacity():
+    mpc = _mpc(
+        _LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), mode="disagg", cold_start_s=0
+    )
+    mpc._isl_now, mpc._osl_ema = 8000.0, 8.0
+    mpc._book_p.reconcile(0.0, 1, 1)
+    mpc._book_d.reconcile(0.0, 1, 1)
+    mu_p, mu_d = mpc._mu_prefill(), mpc._mu_decode()
+    assert mu_p < 5 < 100 < mu_d
+    idle = [0.0] * mpc._plan_steps
+    # 200 requests waiting at decode: the decode worker clears them at once.
+    at_decode = mpc._plan_disagg(idle, (0, 200), 1, 1)
+    assert at_decode[0][0] == 0 and at_decode[0][2] == 200
+    # The same backlog in front of prefill drains at the prefill rate.
+    at_prefill = mpc._plan_disagg(idle, (200, 0), 1, 1)
+    assert at_prefill[0][0] == pytest.approx(200 - 5 * mu_p)
+    assert at_prefill[-1][0] > 50
+    # Each wait is charged at its own stage's capacity.
+    first_token_ms = mpc._prefill_ms() + mpc._kv_transfer_ms()
+    assert at_prefill[0][1] == pytest.approx(200 / mu_p * 1000 + first_token_ms)
+    assert at_decode[0][1] == pytest.approx(200 / mu_d * 1000 + first_token_ms)
+
+
+def test_disagg_does_not_add_prefill_workers_for_a_decode_backlog():
+    """Work waiting at decode has been prefilled: only decode capacity clears it."""
+    mpc = _mpc(
+        _LinearCapacityModel(max_kv_tokens=MAX_KV_TOKENS), mode="disagg", cold_start_s=0
+    )
+    tick, ti = _disagg_tick(
+        0.0,
+        rps=1.0,
+        isl=8000,
+        osl=8,
+        q_prefill=0,
+        q_decode=200,
+        ready_p=1,
+        exp_p=1,
+        ready_d=1,
+        exp_d=1,
+    )
+    d = asyncio.run(mpc.tick(tick, ti)).scale_to
+    # One prefill worker handles ~4 req/s, far above the 1 req/s arriving.
+    assert (d.num_prefill, d.num_decode) == (1, 1)
 
 
 def test_disagg_scale_down_needs_the_cold_start_hold_per_pool():
@@ -773,5 +934,5 @@ def test_efficiency_weight_can_follow_low_goodput_per_gpu():
     mpc = _mpc(_LinearCapacityModel(), mode="disagg", gpus_per_worker=8)
     mpc._book_p.reconcile(0, 1, 1)
     mpc._book_d.reconcile(0, 1, 1)
-    mpc._update_rho_disagg(0.1, 0)
+    mpc._update_rho_disagg(0.1, (0, 0))
     assert 0 < mpc._rho < 0.01

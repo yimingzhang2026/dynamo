@@ -16,8 +16,10 @@ concurrency limit. For aggregate workers, the sustainable request rate is:
 
 ```text
 c_sat = min(0.9 * worker_kv_tokens / attention_dp / (isl + osl), rank_max_num_seqs)
-worker_mu = attention_dp / (prefill_seconds + osl * decode_step_seconds(c_sat) / c_sat)
+worker_mu = attention_dp / (prefill_seconds + (osl - 1) * decode_step_seconds(c_sat) / c_sat)
 ```
+
+Prefill produces a request's first token, so it takes `osl - 1` decode steps.
 
 Capacity is evaluated at saturation. Offered load also enters the latency
 estimate, while a bounded correction learns scheduler effects from observed
@@ -27,7 +29,10 @@ linear trends. Token lengths and cache-hit rates use smoothed observations.
 No pretrained policy checkpoint is required.
 
 A pending replica costs GPUs immediately but contributes service capacity only
-after its cold-start delay. Candidate plans cover that delay plus `horizon`
+after its cold-start delay. A replica still starting after that delay is late:
+the plan expects it at the next control interval and does not count it in the
+current one. While no replica of a pool is ready, the plan gives that pool no
+serving capacity. Candidate plans cover the cold-start delay plus `horizon`
 control intervals. The controller maximizes an approximation of good requests
 per GPU-second using a Dinkelbach objective: predicted good requests minus
 `rho * GPU-seconds`, with `rho` tracking measured recent efficiency. Both TTFT
@@ -60,8 +65,12 @@ place until a positive-duration traffic observation is available; an empty
 startup snapshot is not evidence of zero demand.
 
 In disaggregated mode the controller evaluates separate prefill and decode
-counts within the run's GPU budget and total-worker limits. The series
-throughput is `min(prefill_count * prefill_rate,
+counts within the run's GPU budget and total-worker limits. The plan keeps
+one backlog per stage: prefill capacity (`prefill_count * prefill_rate`) drains
+arrivals and the prefill backlog, and decode capacity (`decode_count *
+decode_rate`) drains what prefill hands over and the work already waiting at
+decode. Work waiting at decode does not pass through prefill again, and
+sustained throughput is `min(prefill_count * prefill_rate,
 decode_count * decode_rate)`. The model includes KV-transfer cost, per-pool
 pending replicas and the GPU cost of each pool. Attention-DP throughput and
 load use each engine's configured parallelism. Shared transfer bandwidth is

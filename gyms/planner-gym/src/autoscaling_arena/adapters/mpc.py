@@ -215,12 +215,17 @@ class CapacityModel(abc.ABC):
             ),
         )
 
+    @staticmethod
+    def decode_steps(osl: float) -> float:
+        """Decode steps of one request: prefill produces its first token."""
+        return max(0.0, osl - 1.0)
+
     def residence_s(
         self, concurrency: float, isl: float, osl: float, kv_hit: float
     ) -> float:
         t_p = self.prefill_ms(isl * (1.0 - kv_hit)) / 1000.0
         t_d = self.decode_step_ms(concurrency, isl, osl) / 1000.0
-        return t_p + max(0.0, osl) * t_d
+        return t_p + self.decode_steps(osl) * t_d
 
     def concurrency(
         self, load_per_worker: float, isl: float, osl: float, kv_hit: float
@@ -252,7 +257,7 @@ class CapacityModel(abc.ABC):
         concurrency at the cap, where decode batching is best. Prefill GPU time
         is serial per request; each decode step is shared by ``c`` requests::
 
-            mu = 1 / ( T_p + osl * T_d(c_sat) / c_sat )
+            mu = 1 / ( T_p + (osl - 1) * T_d(c_sat) / c_sat )
 
         Evaluating at the current load's concurrency instead would charge a
         lightly loaded worker almost a full decode step per token and report a
@@ -267,7 +272,11 @@ class CapacityModel(abc.ABC):
         c = self.saturated_concurrency(isl, osl)
         t_p = self.prefill_ms(isl * (1.0 - kv_hit)) / 1000.0
         t_d = self.decode_step_ms(c, isl, osl) / 1000.0
-        return self.decode_parallelism * self._bias / max(1e-3, t_p + osl * t_d / c)
+        return (
+            self.decode_parallelism
+            * self._bias
+            / max(1e-3, t_p + self.decode_steps(osl) * t_d / c)
+        )
 
     def itl_ms(
         self,
@@ -417,7 +426,9 @@ class AISCapacityModel(CapacityModel):
                         batch_size=c, isl=key[1], osl=key[2]
                     )
                 )
-                self._decode_cache[key] = total / key[2]
+                # AIS sums the ``osl - 1`` steps after the first token; the
+                # bucket floor of 16 keeps the divisor positive.
+                self._decode_cache[key] = total / (key[2] - 1)
             except (RuntimeError, ValueError) as exc:
                 self.fallbacks += 1
                 logger.warning(
@@ -520,13 +531,17 @@ class _PoolBook:
                 to_cancel -= take
             orders = [o for o in orders if o[1] > 0]
             base = max(0, base - to_cancel)
+        # A starter still reported after its booked time is late: expect it at
+        # the next step, and let the observed ready count stand for this one.
+        late_at = self.t_s + self._dt
+        orders = [[r if r >= self.t_s - 1e-6 else late_at, c] for r, c in orders]
         out = []
         for k in range(self._plan_steps):
             t_k = self.t_s + k * self._dt
             n = base + sum(c for r, c in orders if r <= t_k)
             if new and k >= self._lag_steps:
                 n += new
-            out.append(max(1, n))
+            out.append(max(0, n))  # zero while nothing in the pool is ready
         return out
 
 
@@ -768,8 +783,9 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         Pending orders arrive at their booked time; new orders (candidate
         above the provisioned fleet) arrive after the cold start; a smaller
         target cancels pending orders newest-first and removes active
-        workers at once. Late orders (booked time already passed) count from
-        the first step.
+        workers at once. An order due at this tick counts from the first
+        step; one still starting after its booked time is late and is
+        expected at the next step.
         """
         dt = self._poll_interval_s
         orders = sorted(([o[0], o[1]] for o in self._orders), key=lambda o: o[0])
@@ -787,13 +803,17 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
                 to_cancel -= take
             orders = [o for o in orders if o[1] > 0]
             base = max(0, base - to_cancel)
+        # A starter still reported after its booked time is late: expect it at
+        # the next step, and let the observed ready count stand for this one.
+        late_at = self._t_s + dt
+        orders = [[r if r >= self._t_s - 1e-6 else late_at, c] for r, c in orders]
         schedule = []
         for k in range(self._plan_steps):
             t_k = self._t_s + k * dt
             n = base + sum(c for r, c in orders if r <= t_k)
             if new and k >= self._lag_steps:
                 n += new
-            schedule.append(max(1, n))
+            schedule.append(max(0, n))  # zero while no worker is ready
         return schedule
 
     # ---- plant model helpers --------------------------------------------- #
@@ -871,9 +891,13 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         """Reduced fleet keeps utilisation, TTFT and ITL in bounds at every step."""
         schedule = self._active_schedule(candidate)
         for k, step in enumerate(self._queue_plan(forecast_hi, queue_depth, candidate)):
-            ttft = step[1]
+            # Requests already waiting see the wait at the start of the step;
+            # new arrivals see the one at its end. Both must be in bounds.
+            ttft = max(step[1], step[4])
             rps = forecast_hi[min(k, len(forecast_hi) - 1)]
             n_active = schedule[k]
+            if n_active < 1:
+                return False
             if rps > self._downsize_utilisation * n_active * self._mu(rps, n_active):
                 return False
             if ttft >= self._slo_ttft * 0.5:
@@ -943,7 +967,7 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
     def _update_rho(self, observed_rps: float, queue_depth: int) -> None:
         """Measured goodput/GPU-second; use the model until completions arrive."""
         dt = self._poll_interval_s
-        ready = max(1, self._ready)
+        ready = self._ready  # zero ready workers complete nothing
         mu = ready * self._mu(observed_rps, ready)
         saturated = queue_depth > 0 or observed_rps >= mu
         ttft = queue_depth / max(1e-6, mu) * 1000.0 + self._prefill_ms()
@@ -1185,7 +1209,11 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         isl, osl = max(1.0, self._isl_now), max(1.0, self._osl_ema)
         c = self._capacity.saturated_concurrency(isl, osl)
         t_d = self._capacity.decode_step_ms(c, isl, osl) / 1000.0
-        return self._capacity.decode_parallelism * c / max(1e-3, osl * t_d)
+        return (
+            self._capacity.decode_parallelism
+            * c
+            / max(1e-3, self._capacity.decode_steps(osl) * t_d)
+        )
 
     def _decode_itl_ms(self, load_per_worker: float) -> float:
         """Decode step time at the pool's Little's-law concurrency (no prefill on the worker)."""
@@ -1195,44 +1223,84 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         c = 1.0
         for _ in range(30):
             t_d = self._capacity.decode_step_ms(c, isl, osl) / 1000.0
-            c_new = min(cap, max(1.0, load_per_rank * osl * t_d))
+            c_new = min(
+                cap,
+                max(1.0, load_per_rank * self._capacity.decode_steps(osl) * t_d),
+            )
             if abs(c_new - c) < 0.05:
                 c = c_new
                 break
             c = c_new
         return self._capacity.decode_step_ms(c, isl, osl)
 
+    def _stage_step(
+        self,
+        rps: float,
+        q_p: float,
+        q_d: float,
+        cap_p: float,
+        cap_d: float,
+        first_token_ms: float,
+    ) -> tuple[float, float, float, float, bool]:
+        """One interval of the prefill -> decode tandem queue.
+
+        Prefill capacity applies to arrivals and to the prefill backlog.
+        Decode capacity applies to what prefill hands over and to work already
+        waiting at decode, which does not pass through prefill again. Returns
+        the two backlogs after the interval, the TTFT of the requests it
+        serves, the completed requests, and whether decode ran at capacity.
+        """
+        dt = self._poll_interval_s
+        ttft = (
+            q_p / max(1e-6, cap_p) + q_d / max(1e-6, cap_d)
+        ) * 1000.0 + first_token_ms
+        prefilled = min(q_p + rps * dt, cap_p * dt)
+        offered = q_d + prefilled
+        served = min(offered, cap_d * dt)
+        return (
+            q_p + rps * dt - prefilled,
+            offered - served,
+            ttft,
+            served,
+            offered >= cap_d * dt,
+        )
+
     def _plan_disagg(
-        self, forecast_rps: list[float], queue_depth: float, n_p: int, n_d: int
+        self,
+        forecast_rps: list[float],
+        queues: tuple[float, float],
+        n_p: int,
+        n_d: int,
     ) -> list[tuple]:
-        """Per-step (queue_after, ttft_served_ms, served, itl_ms) for the pair."""
+        """Per-step (backlog_after, ttft_served_ms, served, itl_ms) for the pair.
+
+        ``queues`` is the (prefill, decode) backlog; the reported backlog is
+        their sum.
+        """
         dt = self._poll_interval_s
         sched_p = self._book_p.schedule(n_p)
         sched_d = self._book_d.schedule(n_d)
         mu_p, mu_d = self._mu_prefill(), self._mu_decode()
         first_token_ms = self._prefill_ms() + self._kv_transfer_ms()
-        queue = float(queue_depth)
+        q_p, q_d = float(queues[0]), float(queues[1])
         plan = []
         for k in range(self._plan_steps):
             rps = forecast_rps[min(k, len(forecast_rps) - 1)]
-            cap_p, cap_d = sched_p[k] * mu_p, sched_d[k] * mu_d
-            cap = min(cap_p, cap_d)
-            served = min(queue + rps * dt, cap * dt)
-            ttft = queue / max(1e-6, cap) * 1000.0 + first_token_ms
-            decode_saturated = rps >= cap_d or (queue > 0.5 and cap_d <= cap_p)
+            q_p, q_d, ttft, served, decode_saturated = self._stage_step(
+                rps, q_p, q_d, sched_p[k] * mu_p, sched_d[k] * mu_d, first_token_ms
+            )
             itl = (
                 2.0 * self._slo_itl
                 if decode_saturated
-                else self._decode_itl_ms(rps / sched_d[k])
+                else self._decode_itl_ms(served / dt / max(1, sched_d[k]))
             )
-            queue = max(0.0, queue + (rps - cap) * dt)
-            plan.append((queue, ttft, served, itl))
+            plan.append((q_p + q_d, ttft, served, itl))
         return plan
 
     def _cost_disagg(
         self,
         forecast_rps: list[float],
-        queue_depth: float,
+        queues: tuple[float, float],
         n_p: int,
         n_d: int,
         plan: list[tuple] | None = None,
@@ -1241,7 +1309,7 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         gpu = n_p * self._prefill_gpus + n_d * self._gpus_per_worker
         total = 0.0
         if plan is None:
-            plan = self._plan_disagg(forecast_rps, queue_depth, n_p, n_d)
+            plan = self._plan_disagg(forecast_rps, queues, n_p, n_d)
         for _, ttft, served, itl in plan:
             total += served * self._good_fraction(ttft, itl) - self._rho * gpu * dt
         cost = -total
@@ -1254,16 +1322,22 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         return cost
 
     def _feasible_disagg(
-        self, forecast_hi: list[float], queue_depth: float, n_p: int, n_d: int
+        self,
+        forecast_hi: list[float],
+        queues: tuple[float, float],
+        n_p: int,
+        n_d: int,
     ) -> bool:
         """Both pools stay under the utilisation bound and both SLOs at every step."""
         sched_p = self._book_p.schedule(n_p)
         sched_d = self._book_d.schedule(n_d)
         mu_p, mu_d = self._mu_prefill(), self._mu_decode()
         for k, (_, ttft, _, itl) in enumerate(
-            self._plan_disagg(forecast_hi, queue_depth, n_p, n_d)
+            self._plan_disagg(forecast_hi, queues, n_p, n_d)
         ):
             rps = forecast_hi[min(k, len(forecast_hi) - 1)]
+            if sched_p[k] < 1 or sched_d[k] < 1:
+                return False
             if rps > self._downsize_utilisation * sched_p[k] * mu_p:
                 return False
             if rps > self._downsize_utilisation * sched_d[k] * mu_d:
@@ -1275,21 +1349,23 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
                 return False
         return True
 
-    def _update_rho_disagg(self, observed_rps: float, queue_depth: int) -> None:
+    def _update_rho_disagg(
+        self, observed_rps: float, queues: tuple[float, float]
+    ) -> None:
         dt = self._poll_interval_s
-        cap_p = max(1, self._book_p.ready) * self._mu_prefill()
-        cap_d = max(1, self._book_d.ready) * self._mu_decode()
-        cap = min(cap_p, cap_d)
-        ttft = (
-            queue_depth / max(1e-6, cap) * 1000.0
-            + self._prefill_ms()
-            + self._kv_transfer_ms()
+        # A pool with no ready worker has no capacity.
+        _, _, ttft, served, saturated_d = self._stage_step(
+            observed_rps,
+            float(queues[0]),
+            float(queues[1]),
+            self._book_p.ready * self._mu_prefill(),
+            self._book_d.ready * self._mu_decode(),
+            self._prefill_ms() + self._kv_transfer_ms(),
         )
-        saturated_d = observed_rps >= cap_d or (queue_depth > 0 and cap_d <= cap_p)
         itl = (
             2.0 * self._slo_itl
             if saturated_d
-            else self._decode_itl_ms(observed_rps / max(1, self._book_d.ready))
+            else self._decode_itl_ms(served / dt / max(1, self._book_d.ready))
         )
         self._latency_prediction = (
             (self._book_p.expected, self._book_d.expected),
@@ -1304,7 +1380,6 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         ):
             self._rho = max(self._rho_min, self._observed_outcomes["goodput_per_gpu"])
             return
-        served = min(queue_depth + observed_rps * dt, cap * dt)
         good = served * self._good_fraction(ttft, itl)
         gpu = (
             max(1, self._book_p.expected) * self._prefill_gpus
@@ -1319,7 +1394,10 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         self._rho = max(self._rho_min, self._good_ema / max(1e-6, self._gpu_ema))
 
     def _reallocation_improves(
-        self, forecast: list[float], queue_depth: float, pair: tuple[int, int]
+        self,
+        forecast: list[float],
+        queues: tuple[float, float],
+        pair: tuple[int, int],
     ) -> bool:
         """Allow a pool exchange when the coupled plan improves without a new bottleneck."""
         p, d = pair
@@ -1328,8 +1406,8 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
             return False
         if self._book_p.pending or self._book_d.pending:
             return False
-        before = self._plan_disagg(forecast, queue_depth, *current)
-        after = self._plan_disagg(forecast, queue_depth, p, d)
+        before = self._plan_disagg(forecast, queues, *current)
+        after = self._plan_disagg(forecast, queues, p, d)
         for old, new in zip(before, after):
             if new[0] > old[0] + 1e-6:
                 return False
@@ -1371,12 +1449,13 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
         # None (no rank reported) counts as no observed backlog.
         q_p = aggregate_queue_depth(fpm, pool="prefill") or 0
         q_d = aggregate_queue_depth(fpm, pool="decode") or 0
+        queues = (q_p, q_d)
         queue_depth = q_p + q_d
         kv_util = (
             aggregate_kv_util(fpm, self._capabilities, pool="decode") if fpm else None
         )
 
-        self._update_rho_disagg(observed_rps, queue_depth)
+        self._update_rho_disagg(observed_rps, queues)
         self._forecaster.update(
             observed_rps * self._poll_interval_s, self._poll_interval_s
         )
@@ -1398,7 +1477,7 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
                     if is_p
                     else (other_n, book.expected - 1)
                 )
-                feasible = self._feasible_disagg(forecast_hi, queue_depth, *pair)
+                feasible = self._feasible_disagg(forecast_hi, queues, *pair)
             else:
                 feasible = False
             book.downsize_ticks = book.downsize_ticks + 1 if feasible else 0
@@ -1414,15 +1493,15 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
                 guarded_downsize = (
                     (a >= exp_p or can_down_p)
                     and (b >= exp_d or can_down_d)
-                    and self._feasible_disagg(forecast_hi, queue_depth, a, b)
+                    and self._feasible_disagg(forecast_hi, queues, a, b)
                 )
                 if not guarded_downsize and not self._reallocation_improves(
-                    forecast_hi, queue_depth, (a, b)
+                    forecast_hi, queues, (a, b)
                 ):
                     continue
-            plans[a, b] = self._plan_disagg(forecast_rps, queue_depth, a, b)
+            plans[a, b] = self._plan_disagg(forecast_rps, queues, a, b)
             costs[a, b] = self._cost_disagg(
-                forecast_rps, queue_depth, a, b, plan=plans[a, b]
+                forecast_rps, queues, a, b, plan=plans[a, b]
             )
         best = min(costs, key=costs.__getitem__)
         best_cost = costs[best]
