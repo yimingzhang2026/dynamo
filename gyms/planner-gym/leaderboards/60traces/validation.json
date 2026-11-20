@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-09T16:02:49.419986+00:00",
+  "generated_at": "2026-11-19T23:49:40.967015+00:00",
   "counts": {
     "completed": 360
   },
@@ -93,8 +93,8 @@
     },
     {
       "path": "inputs/results.json",
-      "bytes": 2870910,
-      "sha256": "310d9a4d45ef8d95e73622dc18b4a130e277997b070dbb25377f504fb5f09a66"
+      "bytes": 2872333,
+      "sha256": "0ab2b85b01e00632b1151438db45ac8ea763cd588e7b4ce4f2e2ad2340a80696"
     }
   ],
   "static_latency": {
@@ -113,13 +113,13 @@
     "input_manifest": [
       {
         "path": "inputs/red-diagnoses.json",
-        "bytes": 38901,
-        "sha256": "91ed2937c65d4013442660df9a62c2ca506ead89e869dbe89b78b32a034a574c"
+        "bytes": 38898,
+        "sha256": "2b0250929ed5a94da06802960622af5b2bde7af70c552b97273f4236b471e39f"
       },
       {
         "path": "inputs/diagnostic-evidence.json",
-        "bytes": 978045,
-        "sha256": "bbd371dc8d752c0a5a7abf2274604ff84f2db724566b81f5c35e12bd847eb154"
+        "bytes": 977180,
+        "sha256": "dcb14315d1dcfee5b0667215264e05531d1e77a69923468755bfe2e290b9fa1a"
       }
     ]
   },

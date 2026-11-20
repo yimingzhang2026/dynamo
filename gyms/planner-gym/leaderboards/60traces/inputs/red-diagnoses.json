@@ -69,11 +69,11 @@
       "note": "The case allows 40 GPUs. These histories show the applied fleet and observed queues; they do not by themselves establish which alternative scaling decisions would improve SLOs."
     },
     "A-HT-L01-mpc": {
-      "source_sha256": "bf110410244ff7124f5772d01fc84d8d12a21b5ccdfd55a2e63cf5d07068130a",
+      "source_sha256": "92024fb1b999c5d503bfb68a509cfd23552a0724ee27253c0a09d40e070d4058",
       "trace_sha256": "81fce5eec6b4e78fe22ab43a9045528945afc0168681f5ef9ffffb2b1b2a7950",
       "basis": "timeline",
       "evidence_key": "A-HT-L01-mpc",
-      "summary": "13.8% of requests met both objectives. The queue peaked at 604 requests. The most frequent ready fleet was 1 shared workers, present for 47.0% of the arrival window; the ready fleet changed 1,216 times.",
+      "summary": "14.0% of requests met both objectives. The queue peaked at 528 requests. The most frequent ready fleet was 1 shared workers, present for 47.8% of the arrival window; the ready fleet changed 1,182 times.",
       "note": "The case allows 152 GPUs. These histories show the applied fleet and observed queues; they do not by themselves establish which alternative scaling decisions would improve SLOs."
     },
     "A-HT-L01-keda": {
@@ -93,11 +93,11 @@
       "note": "The case allows 152 GPUs. These histories show the applied fleet and observed queues; they do not by themselves establish which alternative scaling decisions would improve SLOs."
     },
     "A-HT-L02-mpc": {
-      "source_sha256": "619395f2f9eba14aed02dd7cbae0a7a68fa1bbcad7af18d925623f3ff9edae4d",
+      "source_sha256": "f3e833d79f185d4d4920851f55ed83de4f557e08d430f9b278b5006999cfc8a7",
       "trace_sha256": "61591e4138f2415135e9b18e29c09ee464789fea3b32dd133420d83e97950105",
       "basis": "timeline",
       "evidence_key": "A-HT-L02-mpc",
-      "summary": "20.2% of requests met both objectives. The queue peaked at 52 requests. The most frequent ready fleet was 4 shared workers, present for 42.9% of the arrival window; the ready fleet changed 6 times.",
+      "summary": "21.5% of requests met both objectives. The queue peaked at 51 requests. The most frequent ready fleet was 5 shared workers, present for 39.1% of the arrival window; the ready fleet changed 8 times.",
       "note": "The case allows 152 GPUs. These histories show the applied fleet and observed queues; they do not by themselves establish which alternative scaling decisions would improve SLOs."
     },
     "A-HT-L02-keda": {
@@ -357,11 +357,11 @@
       "note": "The case allows 152 GPUs. These histories show the applied fleet and observed queues; they do not by themselves establish which alternative scaling decisions would improve SLOs."
     },
     "D-HT-L03-mpc": {
-      "source_sha256": "d547693455ca21bad680e52734a51aa1ee99a5310faca3b10d0abf48207b2056",
+      "source_sha256": "8c7f494f00d4a5de67011b68d483b974ac8fc44f4cd18a1c0a4934a1d024b21a",
       "trace_sha256": "b876a6da842ea519e8135efd0b4f5aa7f424741aedf0b492da7f02c62e25326c",
       "basis": "timeline",
       "evidence_key": "D-HT-L03-mpc",
-      "summary": "34.1% of requests met both objectives. Queues peaked at 11,030 prefill and 18,227 decode requests. The most frequent ready fleet was 1 prefill and 8 decode workers, present for 12.0% of the arrival window; the ready fleet changed 103 times.",
+      "summary": "39.2% of requests met both objectives. Queues peaked at 7,268 prefill and 6,659 decode requests. The most frequent ready fleet was 3 prefill and 8 decode workers, present for 17.6% of the arrival window; the ready fleet changed 83 times.",
       "note": "The case allows 152 GPUs. These histories show the applied fleet and observed queues; they do not by themselves establish which alternative scaling decisions would improve SLOs."
     },
     "D-HT-L03-planner": {

@@ -27,9 +27,11 @@ PLANNERS = {
     "keda": "KEDA",
     "reactive": "Reactive",
     "static": "Static",
-    "knowline31b": "KnowLine-31B",
+    "knowline31b": "Cognitive Agent",
 }
 CORE = ("mpc", "planner", "keda", "reactive", "static", "knowline31b")
+# The label recorded in saved runs. The leaderboard shows PLANNERS instead.
+KNOWLINE_RUN_LABEL = "KnowLine-31B"
 KNOWLINE_MODEL = "PelaAI/KnowLine-31B-Gen1"
 KNOWLINE_REVISION = "8f052a8130e599b53e5324c34f0f5ff90696e1c6"
 
@@ -180,7 +182,7 @@ def validate_record(record, case, expected_job):
         decisions = record.get("decision_summary", {})
         last_attempt = runtime.get("jev", {})
         require(
-            saved.get("autoscaler") == "KnowLine-31B",
+            saved.get("autoscaler") == KNOWLINE_RUN_LABEL,
             "KnowLine controller label mismatch",
         )
         require(
@@ -909,9 +911,9 @@ def make_report(inputs, *, include_diagnostics=True):
             "Every shared case has equal weight. Exact ties receive average ranks and share win credit. Raw scores are available per case.",
             "Only traces completed and validated for every compared controller enter a ranking. Failure and missing metrics stay null, never zero.",
             f"Every case allows up to {resource_policy_description(plan['policy']['resources'])}. All planners start with that original fleet; Static holds it fixed. The per-case setup lists the exact worker bounds. Active, starting and draining workers share the GPU ceiling.",
-            "The main comparison covers cloudAI-MPC, Dynamo, KEDA, Reactive, Static and KnowLine-31B on 60 traces. Pending results have no score and do not enter ranks.",
-            "KnowLine-31B is the open decision model PelaAI/KnowLine-31B-Gen1, served through the self-hosted decision adapter. Each completed cell represents one independent full-trace result.",
-            "KnowLine decides worker scaling; throughput, request latency and simulated GPU hours describe the serving workload, not KnowLine inference performance. Decision-call latency is recorded separately and is excluded from simulated time and GPU-hour rankings.",
+            "The main comparison covers cloudAI-MPC, Dynamo, KEDA, Reactive, Static and Cognitive Agent on 60 traces. Pending results have no score and do not enter ranks.",
+            "Cognitive Agent is a scaling agent built around the open decision model PelaAI/KnowLine-31B-Gen1, whose weights are unchanged and served locally. The agent supplies the measured observations, generates the feasible fleet options, states the efficiency objective and validates every answer before acting. Each completed cell represents one independent full-trace result.",
+            "Cognitive Agent decides worker scaling; throughput, request latency and simulated GPU hours describe the serving workload, not KnowLine inference performance. Decision-call latency is recorded separately and is excluded from simulated time and GPU-hour rankings.",
             "Static uses the current validated fixed-allocation replay in every tab, including ranks, winner highlighting and latency.",
             "Every Static replay is checked against the trace fingerprint, full request count, SLOs, measurement window and fixed GPU allocation. The same saved result supplies all Static metrics.",
             "Autoscaling scores preserve the planned trace fingerprint, request count, arrival window, SLOs, worker limits and scorecard contract. Static holds the original 2- or 16-worker starting deployment fixed.",

@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Running all 60 traces
 
 [comparison.yaml](../configs/60traces/comparison.yaml) is the common execution
-policy. MPC, Dynamo, KEDA, Reactive, Static and KnowLine each cover all 60 cases.
+policy. MPC, Dynamo, KEDA, Reactive, Static and Cognitive Agent each cover all 60 cases.
 Paid JEV is excluded.
 
 ## CPU replay

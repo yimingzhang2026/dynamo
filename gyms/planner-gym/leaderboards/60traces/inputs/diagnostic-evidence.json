@@ -3293,24 +3293,9 @@
       "case_id": "A-HT-L01",
       "planner": "mpc",
       "source_path": "results/A-HT-L01-mpc/results.json",
-      "source_sha256": "bf110410244ff7124f5772d01fc84d8d12a21b5ccdfd55a2e63cf5d07068130a",
+      "source_sha256": "92024fb1b999c5d503bfb68a509cfd23552a0724ee27253c0a09d40e070d4058",
       "trace_sha256": "81fce5eec6b4e78fe22ab43a9045528945afc0168681f5ef9ffffb2b1b2a7950",
       "duration_s": 86400,
-      "metrics": {
-        "goodput_per_gpu": 0.05758978749176251,
-        "goodput_rps": 1.7221527777777779,
-        "good_rate": 0.13838727678571427,
-        "gpu_hours": 717.6909043565865,
-        "mean_ttft_ms": 517.9055607100381,
-        "p99_ttft_ms": 1699.5231739943847,
-        "mean_itl_ms": 147.25591655881232,
-        "oscillation_count": 561,
-        "scale_events": 1216
-      },
-      "sla": {
-        "ttft_ms": 2000,
-        "itl_ms": 50
-      },
       "timeline_available": true,
       "timeline": {
         "samples": 17271,
@@ -3339,7 +3324,7 @@
           "decode_active_kv_cache_utilization": 0.0
         },
         "last_in_window": {
-          "time_s": 86347.75334224245,
+          "time_s": 86347.75549451826,
           "active_prefill_replicas": 0,
           "active_decode_replicas": 2,
           "provisioned_prefill_replicas": 0,
@@ -3354,84 +3339,84 @@
           "prefill_active_kv_cache_utilization": null,
           "decode_active_kv_cache_utilization": 0.0
         },
-        "replay_end_s": 86347.75334224245,
+        "replay_end_s": 86347.75549451826,
         "stats": {
           "active_prefill_replicas": {
             "min": 0,
             "max": 0,
             "integral": 0.0,
-            "covered_s": 86347.75334224245,
+            "covered_s": 86347.75549451826,
             "mean": 0.0
           },
           "active_decode_replicas": {
             "min": 1,
             "max": 19,
-            "integral": 317790.5066844849,
-            "covered_s": 86347.75334224245,
-            "mean": 3.6803564005297362
+            "integral": 324760.5109890365,
+            "covered_s": 86347.75549451826,
+            "mean": 3.7610764649192734
           },
           "provisioned_prefill_replicas": {
             "min": 0,
             "max": 0,
             "integral": 0.0,
-            "covered_s": 86347.75334224245,
+            "covered_s": 86347.75549451826,
             "mean": 0.0
           },
           "provisioned_decode_replicas": {
             "min": 1,
             "max": 19,
-            "integral": 320685.5066844849,
-            "covered_s": 86347.75334224245,
-            "mean": 3.713883619107451
+            "integral": 327985.5109890365,
+            "covered_s": 86347.75549451826,
+            "mean": 3.798425438051583
           },
           "queued_prefill_requests": {
             "min": 0,
             "max": 0,
             "integral": 0.0,
-            "covered_s": 86347.75334224245,
+            "covered_s": 86347.75549451826,
             "mean": 0.0
           },
           "queued_decode_requests": {
             "min": 0,
-            "max": 604,
-            "integral": 512625.0,
-            "covered_s": 86347.75334224245,
-            "mean": 5.936749714473661
+            "max": 528,
+            "integral": 497945.0,
+            "covered_s": 86347.75549451826,
+            "mean": 5.766739357013301
           },
           "total_queued_requests": {
             "min": 0,
-            "max": 604,
-            "integral": 512625.0,
-            "covered_s": 86347.75334224245,
-            "mean": 5.936749714473661
+            "max": 528,
+            "integral": 497945.0,
+            "covered_s": 86347.75549451826,
+            "mean": 5.766739357013301
           },
           "router_pending_prefill_requests": {
             "min": 0,
             "max": 0,
             "integral": 0.0,
-            "covered_s": 86347.75334224245,
+            "covered_s": 86347.75549451826,
             "mean": 0.0
           },
           "router_pending_decode_requests": {
             "min": 0,
             "max": 0,
             "integral": 0.0,
-            "covered_s": 86347.75334224245,
+            "covered_s": 86347.75549451826,
             "mean": 0.0
           },
           "running_prefill_requests": {
             "min": 0,
             "max": 0,
             "integral": 0.0,
-            "covered_s": 86347.75334224245,
+            "covered_s": 86347.75549451826,
             "mean": 0.0
           },
           "running_decode_requests": {
             "min": 0,
-            "max": 6919,
-            "integral": 47212517.39772552,
-            "covered_s": 86347.75334224245,
-            "mean": 546.7718101546545
+            "max": 7695,
+            "integral": 46095553.45879751,
+            "covered_s": 86347.75549451826,
+            "mean": 533.8361512097886
           },
           "prefill_active_kv_cache_utilization": {
             "min": null,
@@ -3442,10 +3427,10 @@
           },
           "decode_active_kv_cache_utilization": {
             "min": 0.0,
-            "max": 0.036650950381442365,
-            "integral": 209.75948607218706,
-            "covered_s": 86347.75334224245,
-            "mean": 0.002429240807699973
+            "max": 0.033813062191585815,
+            "integral": 201.4501818608194,
+            "covered_s": 86347.75549451826,
+            "mean": 0.002333010055757713
           }
         },
         "peaks": {
@@ -3466,20 +3451,20 @@
             "decode_active_kv_cache_utilization": 0.0
           },
           "active_decode_replicas": {
-            "time_s": 6360.0,
+            "time_s": 935.0,
             "active_prefill_replicas": 0,
             "active_decode_replicas": 19,
             "provisioned_prefill_replicas": 0,
             "provisioned_decode_replicas": 19,
             "queued_prefill_requests": 0,
-            "queued_decode_requests": 10,
-            "total_queued_requests": 10,
+            "queued_decode_requests": 26,
+            "total_queued_requests": 26,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
             "running_prefill_requests": 0,
-            "running_decode_requests": 953,
+            "running_decode_requests": 2298,
             "prefill_active_kv_cache_utilization": null,
-            "decode_active_kv_cache_utilization": 0.0009906652657525525
+            "decode_active_kv_cache_utilization": 0.002152868341478095
           },
           "provisioned_prefill_replicas": {
             "time_s": 0.0,
@@ -3498,20 +3483,20 @@
             "decode_active_kv_cache_utilization": 0.0
           },
           "provisioned_decode_replicas": {
-            "time_s": 3100.0,
+            "time_s": 935.0,
             "active_prefill_replicas": 0,
-            "active_decode_replicas": 8,
+            "active_decode_replicas": 19,
             "provisioned_prefill_replicas": 0,
             "provisioned_decode_replicas": 19,
             "queued_prefill_requests": 0,
-            "queued_decode_requests": 25,
-            "total_queued_requests": 25,
+            "queued_decode_requests": 26,
+            "total_queued_requests": 26,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
             "running_prefill_requests": 0,
-            "running_decode_requests": 2215,
+            "running_decode_requests": 2298,
             "prefill_active_kv_cache_utilization": null,
-            "decode_active_kv_cache_utilization": 0.002567436119749495
+            "decode_active_kv_cache_utilization": 0.002152868341478095
           },
           "queued_prefill_requests": {
             "time_s": 0.0,
@@ -3536,14 +3521,14 @@
             "provisioned_prefill_replicas": 0,
             "provisioned_decode_replicas": 3,
             "queued_prefill_requests": 0,
-            "queued_decode_requests": 604,
-            "total_queued_requests": 604,
+            "queued_decode_requests": 528,
+            "total_queued_requests": 528,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
             "running_prefill_requests": 0,
-            "running_decode_requests": 3332,
+            "running_decode_requests": 3422,
             "prefill_active_kv_cache_utilization": null,
-            "decode_active_kv_cache_utilization": 0.020721611564128654
+            "decode_active_kv_cache_utilization": 0.021261769300219262
           },
           "total_queued_requests": {
             "time_s": 3990.0,
@@ -3552,14 +3537,14 @@
             "provisioned_prefill_replicas": 0,
             "provisioned_decode_replicas": 3,
             "queued_prefill_requests": 0,
-            "queued_decode_requests": 604,
-            "total_queued_requests": 604,
+            "queued_decode_requests": 528,
+            "total_queued_requests": 528,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
             "running_prefill_requests": 0,
-            "running_decode_requests": 3332,
+            "running_decode_requests": 3422,
             "prefill_active_kv_cache_utilization": null,
-            "decode_active_kv_cache_utilization": 0.020721611564128654
+            "decode_active_kv_cache_utilization": 0.021261769300219262
           },
           "router_pending_prefill_requests": {
             "time_s": 0.0,
@@ -3610,36 +3595,36 @@
             "decode_active_kv_cache_utilization": 0.0
           },
           "running_decode_requests": {
-            "time_s": 44840.0,
+            "time_s": 44860.0,
             "active_prefill_replicas": 0,
             "active_decode_replicas": 6,
             "provisioned_prefill_replicas": 0,
             "provisioned_decode_replicas": 6,
             "queued_prefill_requests": 0,
-            "queued_decode_requests": 6,
-            "total_queued_requests": 6,
+            "queued_decode_requests": 27,
+            "total_queued_requests": 27,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
             "running_prefill_requests": 0,
-            "running_decode_requests": 6919,
+            "running_decode_requests": 7695,
             "prefill_active_kv_cache_utilization": null,
-            "decode_active_kv_cache_utilization": 0.023649545947443597
+            "decode_active_kv_cache_utilization": 0.027075899148263326
           },
           "decode_active_kv_cache_utilization": {
-            "time_s": 37505.0,
+            "time_s": 39945.0,
             "active_prefill_replicas": 0,
             "active_decode_replicas": 3,
             "provisioned_prefill_replicas": 0,
             "provisioned_decode_replicas": 3,
             "queued_prefill_requests": 0,
-            "queued_decode_requests": 13,
-            "total_queued_requests": 13,
+            "queued_decode_requests": 15,
+            "total_queued_requests": 15,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
             "running_prefill_requests": 0,
-            "running_decode_requests": 5020,
+            "running_decode_requests": 4733,
             "prefill_active_kv_cache_utilization": null,
-            "decode_active_kv_cache_utilization": 0.036650950381442365
+            "decode_active_kv_cache_utilization": 0.033813062191585815
           }
         },
         "arrival_peak": {
@@ -3658,7 +3643,7 @@
         },
         "sampled_arrivals": 1075200,
         "sampled_completions": 1075200,
-        "fleet_changes": 1216,
+        "fleet_changes": 1182,
         "first_changes": [
           {
             "time_s": 10.0,
@@ -3795,10 +3780,10 @@
         ],
         "last_changes": [
           {
-            "time_s": 85415.0,
+            "time_s": 85370.0,
             "from": [
               0,
-              3
+              1
             ],
             "to": [
               0,
@@ -3854,99 +3839,114 @@
           {
             "prefill": 0,
             "decode": 1,
-            "seconds": 40585.0
+            "seconds": 41285.0
           },
           {
             "prefill": 0,
             "decode": 2,
-            "seconds": 10542.753342242446
+            "seconds": 10037.755494518264
           },
           {
             "prefill": 0,
             "decode": 3,
-            "seconds": 8070.0
+            "seconds": 7220.0
           },
           {
             "prefill": 0,
             "decode": 4,
-            "seconds": 4475.0
+            "seconds": 4510.0
           },
           {
             "prefill": 0,
             "decode": 5,
-            "seconds": 3885.0
-          },
-          {
-            "prefill": 0,
-            "decode": 7,
-            "seconds": 2885.0
-          },
-          {
-            "prefill": 0,
-            "decode": 8,
-            "seconds": 2685.0
+            "seconds": 3175.0
           },
           {
             "prefill": 0,
             "decode": 6,
-            "seconds": 2525.0
+            "seconds": 3070.0
           },
           {
             "prefill": 0,
-            "decode": 9,
-            "seconds": 2055.0
+            "decode": 7,
+            "seconds": 2965.0
           },
           {
             "prefill": 0,
-            "decode": 10,
-            "seconds": 1665.0
-          },
-          {
-            "prefill": 0,
-            "decode": 19,
-            "seconds": 1260.0
-          },
-          {
-            "prefill": 0,
-            "decode": 12,
-            "seconds": 1180.0
-          },
-          {
-            "prefill": 0,
-            "decode": 14,
-            "seconds": 930.0
+            "decode": 8,
+            "seconds": 2580.0
           },
           {
             "prefill": 0,
             "decode": 11,
-            "seconds": 875.0
+            "seconds": 2010.0
           },
           {
             "prefill": 0,
-            "decode": 13,
-            "seconds": 865.0
+            "decode": 9,
+            "seconds": 1910.0
           },
           {
             "prefill": 0,
-            "decode": 15,
-            "seconds": 530.0
+            "decode": 12,
+            "seconds": 1450.0
           },
           {
             "prefill": 0,
-            "decode": 16,
-            "seconds": 475.0
+            "decode": 10,
+            "seconds": 1115.0
           },
           {
             "prefill": 0,
-            "decode": 18,
-            "seconds": 455.0
+            "decode": 14,
+            "seconds": 1085.0
+          },
+          {
+            "prefill": 0,
+            "decode": 19,
+            "seconds": 1000.0
           },
           {
             "prefill": 0,
             "decode": 17,
-            "seconds": 405.0
+            "seconds": 985.0
+          },
+          {
+            "prefill": 0,
+            "decode": 13,
+            "seconds": 710.0
+          },
+          {
+            "prefill": 0,
+            "decode": 16,
+            "seconds": 465.0
+          },
+          {
+            "prefill": 0,
+            "decode": 15,
+            "seconds": 465.0
+          },
+          {
+            "prefill": 0,
+            "decode": 18,
+            "seconds": 310.0
           }
         ]
+      },
+      "sla": {
+        "ttft_ms": 2000,
+        "itl_ms": 50
+      },
+      "metrics": {
+        "goodput_per_gpu": 0.056899792105601525,
+        "goodput_rps": 1.7405902777777778,
+        "good_rate": 0.13986886160714285,
+        "gpu_hours": 734.1708136496721,
+        "mean_ttft_ms": 500.3534496887403,
+        "p99_ttft_ms": 1662.0417289957404,
+        "mean_itl_ms": 143.78119407572856,
+        "oscillation_count": 541,
+        "scale_events": 1182
       }
     },
     "A-HT-L01-keda": {
@@ -5226,24 +5226,9 @@
       "case_id": "A-HT-L02",
       "planner": "mpc",
       "source_path": "results/A-HT-L02-mpc/results.json",
-      "source_sha256": "619395f2f9eba14aed02dd7cbae0a7a68fa1bbcad7af18d925623f3ff9edae4d",
+      "source_sha256": "f3e833d79f185d4d4920851f55ed83de4f557e08d430f9b278b5006999cfc8a7",
       "trace_sha256": "61591e4138f2415135e9b18e29c09ee464789fea3b32dd133420d83e97950105",
       "duration_s": 86400,
-      "metrics": {
-        "goodput_per_gpu": 0.19252169338996591,
-        "goodput_rps": 3.994837962962963,
-        "good_rate": 0.20196479656590682,
-        "gpu_hours": 498.0015987959729,
-        "mean_ttft_ms": 860.2810607342587,
-        "p99_ttft_ms": 1617.3871965259314,
-        "mean_itl_ms": 428.7505529682702,
-        "oscillation_count": 4,
-        "scale_events": 6
-      },
-      "sla": {
-        "ttft_ms": 2000,
-        "itl_ms": 50
-      },
       "timeline_available": true,
       "timeline": {
         "samples": 17285,
@@ -5299,9 +5284,9 @@
           "active_decode_replicas": {
             "min": 1,
             "max": 16,
-            "integral": 224155.0,
+            "integral": 257925.0,
             "covered_s": 86400.0,
-            "mean": 2.594386574074074
+            "mean": 2.9852430555555554
           },
           "provisioned_prefill_replicas": {
             "min": 0,
@@ -5313,9 +5298,9 @@
           "provisioned_decode_replicas": {
             "min": 1,
             "max": 16,
-            "integral": 224155.0,
+            "integral": 257925.0,
             "covered_s": 86400.0,
-            "mean": 2.594386574074074
+            "mean": 2.9852430555555554
           },
           "queued_prefill_requests": {
             "min": 0,
@@ -5326,17 +5311,17 @@
           },
           "queued_decode_requests": {
             "min": 0,
-            "max": 52,
-            "integral": 1188930.0,
+            "max": 51,
+            "integral": 1173980.0,
             "covered_s": 86400.0,
-            "mean": 13.760763888888889
+            "mean": 13.587731481481482
           },
           "total_queued_requests": {
             "min": 0,
-            "max": 52,
-            "integral": 1188930.0,
+            "max": 51,
+            "integral": 1173980.0,
             "covered_s": 86400.0,
-            "mean": 13.760763888888889
+            "mean": 13.587731481481482
           },
           "router_pending_prefill_requests": {
             "min": 0,
@@ -5361,10 +5346,10 @@
           },
           "running_decode_requests": {
             "min": 0,
-            "max": 752,
-            "integral": 15646085.0,
+            "max": 641,
+            "integral": 13362225.0,
             "covered_s": 86400.0,
-            "mean": 181.08894675925927
+            "mean": 154.65538194444446
           },
           "prefill_active_kv_cache_utilization": {
             "min": null,
@@ -5375,10 +5360,10 @@
           },
           "decode_active_kv_cache_utilization": {
             "min": 0.0,
-            "max": 0.00353258143567549,
-            "integral": 75.94825975132213,
+            "max": 0.004597013428108743,
+            "integral": 62.023807373099224,
             "covered_s": 86400.0,
-            "mean": 0.0008790307841588209
+            "mean": 0.0007178681408923521
           }
         },
         "peaks": {
@@ -5463,36 +5448,36 @@
             "decode_active_kv_cache_utilization": 0.0
           },
           "queued_decode_requests": {
-            "time_s": 72315.0,
+            "time_s": 67235.0,
             "active_prefill_replicas": 0,
-            "active_decode_replicas": 4,
+            "active_decode_replicas": 5,
             "provisioned_prefill_replicas": 0,
-            "provisioned_decode_replicas": 4,
+            "provisioned_decode_replicas": 5,
             "queued_prefill_requests": 0,
-            "queued_decode_requests": 52,
-            "total_queued_requests": 52,
+            "queued_decode_requests": 51,
+            "total_queued_requests": 51,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
             "running_prefill_requests": 0,
-            "running_decode_requests": 572,
+            "running_decode_requests": 623,
             "prefill_active_kv_cache_utilization": null,
-            "decode_active_kv_cache_utilization": 0.0022961779331890685
+            "decode_active_kv_cache_utilization": 0.0020255377692428955
           },
           "total_queued_requests": {
-            "time_s": 72315.0,
+            "time_s": 67235.0,
             "active_prefill_replicas": 0,
-            "active_decode_replicas": 4,
+            "active_decode_replicas": 5,
             "provisioned_prefill_replicas": 0,
-            "provisioned_decode_replicas": 4,
+            "provisioned_decode_replicas": 5,
             "queued_prefill_requests": 0,
-            "queued_decode_requests": 52,
-            "total_queued_requests": 52,
+            "queued_decode_requests": 51,
+            "total_queued_requests": 51,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
             "running_prefill_requests": 0,
-            "running_decode_requests": 572,
+            "running_decode_requests": 623,
             "prefill_active_kv_cache_utilization": null,
-            "decode_active_kv_cache_utilization": 0.0022961779331890685
+            "decode_active_kv_cache_utilization": 0.0020255377692428955
           },
           "router_pending_prefill_requests": {
             "time_s": 0.0,
@@ -5543,36 +5528,36 @@
             "decode_active_kv_cache_utilization": 0.0
           },
           "running_decode_requests": {
-            "time_s": 69290.0,
+            "time_s": 72065.0,
             "active_prefill_replicas": 0,
-            "active_decode_replicas": 4,
+            "active_decode_replicas": 5,
             "provisioned_prefill_replicas": 0,
-            "provisioned_decode_replicas": 4,
+            "provisioned_decode_replicas": 5,
             "queued_prefill_requests": 0,
-            "queued_decode_requests": 34,
-            "total_queued_requests": 34,
+            "queued_decode_requests": 41,
+            "total_queued_requests": 41,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
             "running_prefill_requests": 0,
-            "running_decode_requests": 752,
+            "running_decode_requests": 641,
             "prefill_active_kv_cache_utilization": null,
-            "decode_active_kv_cache_utilization": 0.003151377921724301
+            "decode_active_kv_cache_utilization": 0.0019266541509623239
           },
           "decode_active_kv_cache_utilization": {
-            "time_s": 165.0,
+            "time_s": 1020.0,
             "active_prefill_replicas": 0,
             "active_decode_replicas": 1,
             "provisioned_prefill_replicas": 0,
             "provisioned_decode_replicas": 1,
             "queued_prefill_requests": 0,
-            "queued_decode_requests": 12,
-            "total_queued_requests": 12,
+            "queued_decode_requests": 11,
+            "total_queued_requests": 11,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
             "running_prefill_requests": 0,
-            "running_decode_requests": 240,
+            "running_decode_requests": 290,
             "prefill_active_kv_cache_utilization": null,
-            "decode_active_kv_cache_utilization": 0.00353258143567549
+            "decode_active_kv_cache_utilization": 0.004597013428108743
           }
         },
         "arrival_peak": {
@@ -5581,9 +5566,9 @@
           "window_s": 5.0
         },
         "peak_queue_worker_states": {
-          "time_s": 72315.0,
+          "time_s": 67235.0,
           "active_prefill_ids": 0,
-          "active_decode_ids": 4,
+          "active_decode_ids": 5,
           "starting_prefill_ids": 0,
           "starting_decode_ids": 0,
           "draining_prefill_ids": 0,
@@ -5591,7 +5576,7 @@
         },
         "sampled_arrivals": 1708981,
         "sampled_completions": 1708943,
-        "fleet_changes": 6,
+        "fleet_changes": 8,
         "first_changes": [
           {
             "time_s": 10.0,
@@ -5605,7 +5590,7 @@
             ]
           },
           {
-            "time_s": 665.0,
+            "time_s": 2480.0,
             "from": [
               0,
               1
@@ -5638,10 +5623,32 @@
             ]
           },
           {
-            "time_s": 48415.0,
+            "time_s": 44170.0,
             "from": [
               0,
               2
+            ],
+            "to": [
+              0,
+              3
+            ]
+          },
+          {
+            "time_s": 50830.0,
+            "from": [
+              0,
+              3
+            ],
+            "to": [
+              0,
+              5
+            ]
+          },
+          {
+            "time_s": 84585.0,
+            "from": [
+              0,
+              5
             ],
             "to": [
               0,
@@ -5662,28 +5669,6 @@
         ],
         "last_changes": [
           {
-            "time_s": 665.0,
-            "from": [
-              0,
-              1
-            ],
-            "to": [
-              0,
-              2
-            ]
-          },
-          {
-            "time_s": 20985.0,
-            "from": [
-              0,
-              2
-            ],
-            "to": [
-              0,
-              1
-            ]
-          },
-          {
             "time_s": 44160.0,
             "from": [
               0,
@@ -5695,10 +5680,32 @@
             ]
           },
           {
-            "time_s": 48415.0,
+            "time_s": 44170.0,
             "from": [
               0,
               2
+            ],
+            "to": [
+              0,
+              3
+            ]
+          },
+          {
+            "time_s": 50830.0,
+            "from": [
+              0,
+              3
+            ],
+            "to": [
+              0,
+              5
+            ]
+          },
+          {
+            "time_s": 84585.0,
+            "from": [
+              0,
+              5
             ],
             "to": [
               0,
@@ -5720,23 +5727,28 @@
         "fleet_residence": [
           {
             "prefill": 0,
-            "decode": 4,
-            "seconds": 37060.0
-          },
-          {
-            "prefill": 0,
-            "decode": 2,
-            "seconds": 24575.0
+            "decode": 5,
+            "seconds": 33755.0
           },
           {
             "prefill": 0,
             "decode": 1,
-            "seconds": 23830.0
+            "seconds": 25645.0
+          },
+          {
+            "prefill": 0,
+            "decode": 2,
+            "seconds": 18515.0
           },
           {
             "prefill": 0,
             "decode": 3,
-            "seconds": 925.0
+            "seconds": 7585.0
+          },
+          {
+            "prefill": 0,
+            "decode": 4,
+            "seconds": 890.0
           },
           {
             "prefill": 0,
@@ -5744,6 +5756,21 @@
             "seconds": 10.0
           }
         ]
+      },
+      "sla": {
+        "ttft_ms": 2000,
+        "itl_ms": 50
+      },
+      "metrics": {
+        "goodput_per_gpu": 0.17816551150556292,
+        "goodput_rps": 4.254108796296296,
+        "good_rate": 0.2150726075948182,
+        "gpu_hours": 573.0548535928248,
+        "mean_ttft_ms": 793.1036653299926,
+        "p99_ttft_ms": 1593.753207091242,
+        "mean_itl_ms": 366.5895473929505,
+        "oscillation_count": 4,
+        "scale_events": 8
       }
     },
     "A-HT-L02-keda": {
@@ -23810,30 +23837,15 @@
       "case_id": "D-HT-L03",
       "planner": "mpc",
       "source_path": "results/D-HT-L03-mpc/results.json",
-      "source_sha256": "d547693455ca21bad680e52734a51aa1ee99a5310faca3b10d0abf48207b2056",
+      "source_sha256": "8c7f494f00d4a5de67011b68d483b974ac8fc44f4cd18a1c0a4934a1d024b21a",
       "trace_sha256": "b876a6da842ea519e8135efd0b4f5aa7f424741aedf0b492da7f02c62e25326c",
       "duration_s": 7191.734,
-      "metrics": {
-        "goodput_per_gpu": 0.09628454031140843,
-        "goodput_rps": 14.015952202904053,
-        "good_rate": 0.34054981772971293,
-        "gpu_hours": 290.8018476451575,
-        "mean_ttft_ms": 74547.77278464427,
-        "p99_ttft_ms": 699530.7401520032,
-        "mean_itl_ms": 42.47649454957582,
-        "oscillation_count": 48,
-        "scale_events": 122
-      },
-      "sla": {
-        "ttft_ms": 2000,
-        "itl_ms": 50
-      },
       "timeline_available": true,
       "timeline": {
-        "samples": 1519,
+        "samples": 1517,
         "sample_kinds": {
           "baseline": 1,
-          "periodic": 1517,
+          "periodic": 1515,
           "final": 1
         },
         "queue_semantics": [
@@ -23858,7 +23870,7 @@
         "last_in_window": {
           "time_s": 7190.0,
           "active_prefill_replicas": 1,
-          "active_decode_replicas": 2,
+          "active_decode_replicas": 1,
           "provisioned_prefill_replicas": 1,
           "provisioned_decode_replicas": 8,
           "queued_prefill_requests": 0,
@@ -23867,60 +23879,60 @@
           "router_pending_prefill_requests": 0,
           "router_pending_decode_requests": 0,
           "running_prefill_requests": 0,
-          "running_decode_requests": 1125,
+          "running_decode_requests": 1111,
           "prefill_active_kv_cache_utilization": 0.0,
-          "decode_active_kv_cache_utilization": 0.015597457687843047
+          "decode_active_kv_cache_utilization": 0.014533742243368349
         },
-        "replay_end_s": 7586.060753911167,
+        "replay_end_s": 7577.014787500036,
         "stats": {
           "active_prefill_replicas": {
             "min": 1,
-            "max": 10,
-            "integral": 27176.734,
+            "max": 9,
+            "integral": 22566.734,
             "covered_s": 7191.734,
-            "mean": 3.778884758529723
+            "mean": 3.1378710614157863
           },
           "active_decode_replicas": {
-            "min": 2,
-            "max": 14,
-            "integral": 59773.468,
+            "min": 1,
+            "max": 16,
+            "integral": 64026.734,
             "covered_s": 7191.734,
-            "mean": 8.31141251887236
+            "mean": 8.902822879711623
           },
           "provisioned_prefill_replicas": {
             "min": 1,
-            "max": 10,
-            "integral": 27181.734,
+            "max": 9,
+            "integral": 22596.734,
             "covered_s": 7191.734,
-            "mean": 3.7795800011513214
+            "mean": 3.142042517145378
           },
           "provisioned_decode_replicas": {
-            "min": 6,
+            "min": 8,
             "max": 18,
-            "integral": 103528.872,
+            "integral": 109748.872,
             "covered_s": 7191.734,
-            "mean": 14.395536876085794
+            "mean": 15.26041869735449
           },
           "queued_prefill_requests": {
             "min": 0,
-            "max": 11030,
-            "integral": 9072465.0,
+            "max": 7268,
+            "integral": 5422470.0,
             "covered_s": 7191.734,
-            "mean": 1261.5128701923625
+            "mean": 753.9864516679844
           },
           "queued_decode_requests": {
             "min": 0,
-            "max": 18227,
-            "integral": 12764810.0,
+            "max": 6659,
+            "integral": 1956460.0,
             "covered_s": 7191.734,
-            "mean": 1774.9279937216809
+            "mean": 272.042875890571
           },
           "total_queued_requests": {
             "min": 0,
-            "max": 18286,
-            "integral": 21837275.0,
+            "max": 7820,
+            "integral": 7378930.0,
             "covered_s": 7191.734,
-            "mean": 3036.4408639140433
+            "mean": 1026.0293275585555
           },
           "router_pending_prefill_requests": {
             "min": 0,
@@ -23938,145 +23950,145 @@
           },
           "running_prefill_requests": {
             "min": 0,
-            "max": 65,
-            "integral": 88855.0,
+            "max": 62,
+            "integral": 92995.0,
             "covered_s": 7191.734,
-            "mean": 12.355156628429249
+            "mean": 12.930817519112914
           },
           "running_decode_requests": {
             "min": 0,
-            "max": 10598,
-            "integral": 45837290.75,
+            "max": 14642,
+            "integral": 43934241.474,
             "covered_s": 7191.734,
-            "mean": 6373.6076376017245
+            "mean": 6108.991444066201
           },
           "prefill_active_kv_cache_utilization": {
             "min": 0.0,
-            "max": 0.0029342638902821764,
-            "integral": 4.998714707027419,
+            "max": 0.001670273291391393,
+            "integral": 5.262765510874806,
             "covered_s": 7191.734,
-            "mean": 0.0006950639035074739
+            "mean": 0.0007317797781278905
           },
           "decode_active_kv_cache_utilization": {
             "min": 0.0,
-            "max": 0.11953300778171083,
-            "integral": 282.9575663849211,
+            "max": 0.06011700033916603,
+            "integral": 230.92759095790356,
             "covered_s": 7191.734,
-            "mean": 0.03934483205092417
+            "mean": 0.03211014074740578
           }
         },
         "peaks": {
           "active_prefill_replicas": {
-            "time_s": 30.0,
-            "active_prefill_replicas": 10,
-            "active_decode_replicas": 3,
-            "provisioned_prefill_replicas": 10,
-            "provisioned_decode_replicas": 9,
-            "queued_prefill_requests": 1037,
-            "queued_decode_requests": 17,
-            "total_queued_requests": 1054,
+            "time_s": 25.0,
+            "active_prefill_replicas": 9,
+            "active_decode_replicas": 4,
+            "provisioned_prefill_replicas": 9,
+            "provisioned_decode_replicas": 10,
+            "queued_prefill_requests": 1101,
+            "queued_decode_requests": 0,
+            "total_queued_requests": 1101,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
-            "running_prefill_requests": 65,
-            "running_decode_requests": 2171,
-            "prefill_active_kv_cache_utilization": 0.0005987116467705184,
-            "decode_active_kv_cache_utilization": 0.013400641071573587
+            "running_prefill_requests": 62,
+            "running_decode_requests": 1656,
+            "prefill_active_kv_cache_utilization": 0.0009018950305010581,
+            "decode_active_kv_cache_utilization": 0.006446065435159575
           },
           "active_decode_replicas": {
-            "time_s": 915.0,
-            "active_prefill_replicas": 4,
-            "active_decode_replicas": 14,
-            "provisioned_prefill_replicas": 4,
-            "provisioned_decode_replicas": 15,
-            "queued_prefill_requests": 15,
-            "queued_decode_requests": 9785,
-            "total_queued_requests": 9800,
-            "router_pending_prefill_requests": 0,
-            "router_pending_decode_requests": 0,
-            "running_prefill_requests": 4,
-            "running_decode_requests": 8194,
-            "prefill_active_kv_cache_utilization": 0.0001405329683715731,
-            "decode_active_kv_cache_utilization": 0.03261838907735238
-          },
-          "provisioned_prefill_replicas": {
-            "time_s": 30.0,
-            "active_prefill_replicas": 10,
-            "active_decode_replicas": 3,
-            "provisioned_prefill_replicas": 10,
-            "provisioned_decode_replicas": 9,
-            "queued_prefill_requests": 1037,
-            "queued_decode_requests": 17,
-            "total_queued_requests": 1054,
-            "router_pending_prefill_requests": 0,
-            "router_pending_decode_requests": 0,
-            "running_prefill_requests": 65,
-            "running_decode_requests": 2171,
-            "prefill_active_kv_cache_utilization": 0.0005987116467705184,
-            "decode_active_kv_cache_utilization": 0.013400641071573587
-          },
-          "provisioned_decode_replicas": {
-            "time_s": 1690.0,
+            "time_s": 665.0,
             "active_prefill_replicas": 1,
-            "active_decode_replicas": 8,
+            "active_decode_replicas": 16,
             "provisioned_prefill_replicas": 1,
             "provisioned_decode_replicas": 18,
-            "queued_prefill_requests": 115,
-            "queued_decode_requests": 0,
-            "total_queued_requests": 115,
+            "queued_prefill_requests": 32,
+            "queued_decode_requests": 1727,
+            "total_queued_requests": 1759,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
-            "running_prefill_requests": 8,
-            "running_decode_requests": 4918,
-            "prefill_active_kv_cache_utilization": 0.0011625990627552702,
-            "decode_active_kv_cache_utilization": 0.026353111251236044
+            "running_prefill_requests": 2,
+            "running_decode_requests": 13531,
+            "prefill_active_kv_cache_utilization": 0.0005069576806775677,
+            "decode_active_kv_cache_utilization": 0.033976196276816806
+          },
+          "provisioned_prefill_replicas": {
+            "time_s": 25.0,
+            "active_prefill_replicas": 9,
+            "active_decode_replicas": 4,
+            "provisioned_prefill_replicas": 9,
+            "provisioned_decode_replicas": 10,
+            "queued_prefill_requests": 1101,
+            "queued_decode_requests": 0,
+            "total_queued_requests": 1101,
+            "router_pending_prefill_requests": 0,
+            "router_pending_decode_requests": 0,
+            "running_prefill_requests": 62,
+            "running_decode_requests": 1656,
+            "prefill_active_kv_cache_utilization": 0.0009018950305010581,
+            "decode_active_kv_cache_utilization": 0.006446065435159575
+          },
+          "provisioned_decode_replicas": {
+            "time_s": 665.0,
+            "active_prefill_replicas": 1,
+            "active_decode_replicas": 16,
+            "provisioned_prefill_replicas": 1,
+            "provisioned_decode_replicas": 18,
+            "queued_prefill_requests": 32,
+            "queued_decode_requests": 1727,
+            "total_queued_requests": 1759,
+            "router_pending_prefill_requests": 0,
+            "router_pending_decode_requests": 0,
+            "running_prefill_requests": 2,
+            "running_decode_requests": 13531,
+            "prefill_active_kv_cache_utilization": 0.0005069576806775677,
+            "decode_active_kv_cache_utilization": 0.033976196276816806
           },
           "queued_prefill_requests": {
-            "time_s": 2550.0,
-            "active_prefill_replicas": 1,
+            "time_s": 4045.0,
+            "active_prefill_replicas": 3,
             "active_decode_replicas": 8,
-            "provisioned_prefill_replicas": 1,
-            "provisioned_decode_replicas": 17,
-            "queued_prefill_requests": 11030,
+            "provisioned_prefill_replicas": 3,
+            "provisioned_decode_replicas": 16,
+            "queued_prefill_requests": 7268,
             "queued_decode_requests": 0,
-            "total_queued_requests": 11030,
+            "total_queued_requests": 7268,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
-            "running_prefill_requests": 8,
-            "running_decode_requests": 3695,
-            "prefill_active_kv_cache_utilization": 0.0022109087261210393,
-            "decode_active_kv_cache_utilization": 0.027567212198512447
+            "running_prefill_requests": 24,
+            "running_decode_requests": 7147,
+            "prefill_active_kv_cache_utilization": 0.001065626239030845,
+            "decode_active_kv_cache_utilization": 0.04296452908468164
           },
           "queued_decode_requests": {
-            "time_s": 465.0,
-            "active_prefill_replicas": 8,
-            "active_decode_replicas": 11,
-            "provisioned_prefill_replicas": 8,
-            "provisioned_decode_replicas": 11,
-            "queued_prefill_requests": 55,
-            "queued_decode_requests": 18227,
-            "total_queued_requests": 18282,
+            "time_s": 390.0,
+            "active_prefill_replicas": 2,
+            "active_decode_replicas": 8,
+            "provisioned_prefill_replicas": 2,
+            "provisioned_decode_replicas": 12,
+            "queued_prefill_requests": 572,
+            "queued_decode_requests": 6659,
+            "total_queued_requests": 7231,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
-            "running_prefill_requests": 5,
-            "running_decode_requests": 10356,
-            "prefill_active_kv_cache_utilization": 0.0001390998724544634,
-            "decode_active_kv_cache_utilization": 0.05073397310209245
+            "running_prefill_requests": 16,
+            "running_decode_requests": 12664,
+            "prefill_active_kv_cache_utilization": 0.0012213559953567692,
+            "decode_active_kv_cache_utilization": 0.05021630791498875
           },
           "total_queued_requests": {
             "time_s": 460.0,
-            "active_prefill_replicas": 8,
-            "active_decode_replicas": 11,
-            "provisioned_prefill_replicas": 8,
-            "provisioned_decode_replicas": 11,
-            "queued_prefill_requests": 69,
-            "queued_decode_requests": 18217,
-            "total_queued_requests": 18286,
+            "active_prefill_replicas": 2,
+            "active_decode_replicas": 15,
+            "provisioned_prefill_replicas": 2,
+            "provisioned_decode_replicas": 17,
+            "queued_prefill_requests": 2611,
+            "queued_decode_requests": 5209,
+            "total_queued_requests": 7820,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
-            "running_prefill_requests": 13,
-            "running_decode_requests": 10247,
-            "prefill_active_kv_cache_utilization": 0.00027094469682855874,
-            "decode_active_kv_cache_utilization": 0.05026072574582871
+            "running_prefill_requests": 16,
+            "running_decode_requests": 13609,
+            "prefill_active_kv_cache_utilization": 0.00120308402241362,
+            "decode_active_kv_cache_utilization": 0.029639958535758133
           },
           "router_pending_prefill_requests": {
             "time_s": 0.0,
@@ -24111,68 +24123,68 @@
             "decode_active_kv_cache_utilization": 0.0
           },
           "running_prefill_requests": {
-            "time_s": 30.0,
-            "active_prefill_replicas": 10,
-            "active_decode_replicas": 3,
-            "provisioned_prefill_replicas": 10,
-            "provisioned_decode_replicas": 9,
-            "queued_prefill_requests": 1037,
-            "queued_decode_requests": 17,
-            "total_queued_requests": 1054,
-            "router_pending_prefill_requests": 0,
-            "router_pending_decode_requests": 0,
-            "running_prefill_requests": 65,
-            "running_decode_requests": 2171,
-            "prefill_active_kv_cache_utilization": 0.0005987116467705184,
-            "decode_active_kv_cache_utilization": 0.013400641071573587
-          },
-          "running_decode_requests": {
-            "time_s": 4430.0,
-            "active_prefill_replicas": 4,
-            "active_decode_replicas": 8,
-            "provisioned_prefill_replicas": 4,
-            "provisioned_decode_replicas": 15,
-            "queued_prefill_requests": 399,
-            "queued_decode_requests": 0,
-            "total_queued_requests": 399,
-            "router_pending_prefill_requests": 0,
-            "router_pending_decode_requests": 0,
-            "running_prefill_requests": 24,
-            "running_decode_requests": 10598,
-            "prefill_active_kv_cache_utilization": 0.0009043730921910603,
-            "decode_active_kv_cache_utilization": 0.0655597493515241
-          },
-          "prefill_active_kv_cache_utilization": {
-            "time_s": 2530.0,
-            "active_prefill_replicas": 1,
-            "active_decode_replicas": 8,
-            "provisioned_prefill_replicas": 1,
-            "provisioned_decode_replicas": 18,
-            "queued_prefill_requests": 10949,
-            "queued_decode_requests": 0,
-            "total_queued_requests": 10949,
-            "router_pending_prefill_requests": 0,
-            "router_pending_decode_requests": 0,
-            "running_prefill_requests": 8,
-            "running_decode_requests": 3701,
-            "prefill_active_kv_cache_utilization": 0.0029342638902821764,
-            "decode_active_kv_cache_utilization": 0.027193263732641627
-          },
-          "decode_active_kv_cache_utilization": {
-            "time_s": 390.0,
+            "time_s": 25.0,
             "active_prefill_replicas": 9,
             "active_decode_replicas": 4,
             "provisioned_prefill_replicas": 9,
-            "provisioned_decode_replicas": 6,
-            "queued_prefill_requests": 80,
-            "queued_decode_requests": 17947,
-            "total_queued_requests": 18027,
+            "provisioned_decode_replicas": 10,
+            "queued_prefill_requests": 1101,
+            "queued_decode_requests": 0,
+            "total_queued_requests": 1101,
             "router_pending_prefill_requests": 0,
             "router_pending_decode_requests": 0,
-            "running_prefill_requests": 17,
-            "running_decode_requests": 7772,
-            "prefill_active_kv_cache_utilization": 0.0003638869382861128,
-            "decode_active_kv_cache_utilization": 0.11953300778171083
+            "running_prefill_requests": 62,
+            "running_decode_requests": 1656,
+            "prefill_active_kv_cache_utilization": 0.0009018950305010581,
+            "decode_active_kv_cache_utilization": 0.006446065435159575
+          },
+          "running_decode_requests": {
+            "time_s": 540.0,
+            "active_prefill_replicas": 2,
+            "active_decode_replicas": 15,
+            "provisioned_prefill_replicas": 2,
+            "provisioned_decode_replicas": 17,
+            "queued_prefill_requests": 770,
+            "queued_decode_requests": 4150,
+            "total_queued_requests": 4920,
+            "router_pending_prefill_requests": 0,
+            "router_pending_decode_requests": 0,
+            "running_prefill_requests": 16,
+            "running_decode_requests": 14642,
+            "prefill_active_kv_cache_utilization": 0.0010536837730549305,
+            "decode_active_kv_cache_utilization": 0.0332297204985263
+          },
+          "prefill_active_kv_cache_utilization": {
+            "time_s": 1170.0,
+            "active_prefill_replicas": 1,
+            "active_decode_replicas": 15,
+            "provisioned_prefill_replicas": 1,
+            "provisioned_decode_replicas": 18,
+            "queued_prefill_requests": 2179,
+            "queued_decode_requests": 0,
+            "total_queued_requests": 2179,
+            "router_pending_prefill_requests": 0,
+            "router_pending_decode_requests": 0,
+            "running_prefill_requests": 8,
+            "running_decode_requests": 2893,
+            "prefill_active_kv_cache_utilization": 0.001670273291391393,
+            "decode_active_kv_cache_utilization": 0.010831601675766826
+          },
+          "decode_active_kv_cache_utilization": {
+            "time_s": 350.0,
+            "active_prefill_replicas": 4,
+            "active_decode_replicas": 6,
+            "provisioned_prefill_replicas": 4,
+            "provisioned_decode_replicas": 14,
+            "queued_prefill_requests": 117,
+            "queued_decode_requests": 6050,
+            "total_queued_requests": 6167,
+            "router_pending_prefill_requests": 0,
+            "router_pending_decode_requests": 0,
+            "running_prefill_requests": 18,
+            "running_decode_requests": 12224,
+            "prefill_active_kv_cache_utilization": 0.0011003489588558163,
+            "decode_active_kv_cache_utilization": 0.06011700033916603
           }
         },
         "arrival_peak": {
@@ -24181,17 +24193,17 @@
           "window_s": 5.0
         },
         "peak_queue_worker_states": {
-          "time_s": 465.0,
-          "active_prefill_ids": 8,
-          "active_decode_ids": 11,
+          "time_s": 390.0,
+          "active_prefill_ids": 2,
+          "active_decode_ids": 8,
           "starting_prefill_ids": 0,
           "starting_decode_ids": 0,
           "draining_prefill_ids": 0,
-          "draining_decode_ids": 0
+          "draining_decode_ids": 4
         },
         "sampled_arrivals": 295962,
-        "sampled_completions": 294837,
-        "fleet_changes": 103,
+        "sampled_completions": 294851,
+        "fleet_changes": 83,
         "first_changes": [
           {
             "time_s": 10.0,
@@ -24223,137 +24235,126 @@
             ],
             "to": [
               9,
-              3
-            ]
-          },
-          {
-            "time_s": 30.0,
-            "from": [
-              9,
-              3
-            ],
-            "to": [
-              10,
-              3
+              4
             ]
           },
           {
             "time_s": 65.0,
             "from": [
-              10,
-              3
-            ],
-            "to": [
-              3,
-              3
-            ]
-          },
-          {
-            "time_s": 80.0,
-            "from": [
-              3,
-              3
-            ],
-            "to": [
-              5,
-              3
-            ]
-          },
-          {
-            "time_s": 90.0,
-            "from": [
-              5,
-              3
-            ],
-            "to": [
-              7,
-              3
-            ]
-          },
-          {
-            "time_s": 125.0,
-            "from": [
-              7,
-              3
-            ],
-            "to": [
-              10,
-              3
-            ]
-          },
-          {
-            "time_s": 275.0,
-            "from": [
-              10,
-              3
-            ],
-            "to": [
-              9,
-              3
-            ]
-          },
-          {
-            "time_s": 280.0,
-            "from": [
-              9,
-              3
-            ],
-            "to": [
-              9,
-              4
-            ]
-          },
-          {
-            "time_s": 395.0,
-            "from": [
               9,
               4
             ],
             "to": [
-              9,
-              8
+              5,
+              2
             ]
           },
           {
-            "time_s": 400.0,
+            "time_s": 95.0,
             "from": [
-              9,
-              8
+              5,
+              2
             ],
             "to": [
-              8,
+              5,
+              5
+            ]
+          },
+          {
+            "time_s": 100.0,
+            "from": [
+              5,
+              5
+            ],
+            "to": [
+              6,
+              5
+            ]
+          },
+          {
+            "time_s": 185.0,
+            "from": [
+              6,
+              5
+            ],
+            "to": [
+              5,
+              5
+            ]
+          },
+          {
+            "time_s": 190.0,
+            "from": [
+              5,
+              5
+            ],
+            "to": [
+              5,
+              6
+            ]
+          },
+          {
+            "time_s": 345.0,
+            "from": [
+              5,
+              6
+            ],
+            "to": [
+              4,
+              6
+            ]
+          },
+          {
+            "time_s": 355.0,
+            "from": [
+              4,
+              6
+            ],
+            "to": [
+              4,
+              7
+            ]
+          },
+          {
+            "time_s": 360.0,
+            "from": [
+              4,
+              7
+            ],
+            "to": [
+              3,
+              7
+            ]
+          },
+          {
+            "time_s": 370.0,
+            "from": [
+              3,
+              7
+            ],
+            "to": [
+              3,
               8
             ]
           }
         ],
         "last_changes": [
           {
-            "time_s": 7095.0,
+            "time_s": 7110.0,
             "from": [
-              2,
-              8
+              1,
+              5
             ],
             "to": [
               2,
-              7
+              6
             ]
           },
           {
-            "time_s": 7100.0,
+            "time_s": 7115.0,
             "from": [
               2,
-              7
-            ],
-            "to": [
-              1,
-              7
-            ]
-          },
-          {
-            "time_s": 7105.0,
-            "from": [
-              1,
-              7
+              6
             ],
             "to": [
               1,
@@ -24361,7 +24362,7 @@
             ]
           },
           {
-            "time_s": 7155.0,
+            "time_s": 7150.0,
             "from": [
               1,
               4
@@ -24381,223 +24382,189 @@
               1,
               2
             ]
+          },
+          {
+            "time_s": 7190.0,
+            "from": [
+              1,
+              2
+            ],
+            "to": [
+              1,
+              1
+            ]
           }
         ],
         "fleet_residence": [
           {
-            "prefill": 1,
-            "decode": 8,
-            "seconds": 865.0
-          },
-          {
             "prefill": 3,
-            "decode": 7,
-            "seconds": 815.0
-          },
-          {
-            "prefill": 4,
             "decode": 8,
-            "seconds": 765.0
+            "seconds": 1265.0
           },
           {
             "prefill": 2,
-            "decode": 8,
-            "seconds": 610.0
+            "decode": 7,
+            "seconds": 640.0
           },
           {
-            "prefill": 5,
-            "decode": 8,
-            "seconds": 525.0
+            "prefill": 1,
+            "decode": 16,
+            "seconds": 490.0
           },
           {
-            "prefill": 3,
+            "prefill": 6,
+            "decode": 10,
+            "seconds": 430.0
+          },
+          {
+            "prefill": 4,
             "decode": 8,
             "seconds": 420.0
           },
           {
             "prefill": 5,
-            "decode": 12,
+            "decode": 8,
             "seconds": 355.0
           },
           {
+            "prefill": 5,
+            "decode": 9,
+            "seconds": 340.0
+          },
+          {
+            "prefill": 3,
+            "decode": 6,
+            "seconds": 330.0
+          },
+          {
+            "prefill": 3,
+            "decode": 9,
+            "seconds": 320.0
+          },
+          {
             "prefill": 2,
+            "decode": 9,
+            "seconds": 315.0
+          },
+          {
+            "prefill": 3,
             "decode": 7,
-            "seconds": 215.0
+            "seconds": 275.0
           },
           {
-            "prefill": 8,
-            "decode": 11,
-            "seconds": 200.0
-          },
-          {
-            "prefill": 5,
-            "decode": 13,
-            "seconds": 200.0
-          },
-          {
-            "prefill": 6,
-            "decode": 10,
-            "seconds": 195.0
-          },
-          {
-            "prefill": 10,
-            "decode": 3,
-            "seconds": 185.0
-          },
-          {
-            "prefill": 5,
-            "decode": 14,
-            "seconds": 165.0
-          },
-          {
-            "prefill": 6,
-            "decode": 12,
-            "seconds": 155.0
+            "prefill": 2,
+            "decode": 15,
+            "seconds": 250.0
           },
           {
             "prefill": 2,
             "decode": 6,
-            "seconds": 150.0
-          },
-          {
-            "prefill": 9,
-            "decode": 4,
-            "seconds": 115.0
+            "seconds": 185.0
           },
           {
             "prefill": 2,
+            "decode": 8,
+            "seconds": 170.0
+          },
+          {
+            "prefill": 2,
+            "decode": 5,
+            "seconds": 170.0
+          },
+          {
+            "prefill": 5,
+            "decode": 6,
+            "seconds": 155.0
+          },
+          {
+            "prefill": 1,
+            "decode": 15,
+            "seconds": 145.0
+          },
+          {
+            "prefill": 1,
+            "decode": 14,
+            "seconds": 135.0
+          },
+          {
+            "prefill": 3,
+            "decode": 14,
+            "seconds": 110.0
+          },
+          {
+            "prefill": 6,
             "decode": 9,
             "seconds": 100.0
           },
           {
-            "prefill": 1,
-            "decode": 7,
-            "seconds": 95.0
-          },
-          {
-            "prefill": 5,
-            "decode": 9,
-            "seconds": 90.0
-          },
-          {
-            "prefill": 7,
-            "decode": 11,
+            "prefill": 6,
+            "decode": 5,
             "seconds": 85.0
           },
           {
-            "prefill": 8,
-            "decode": 10,
+            "prefill": 4,
+            "decode": 6,
             "seconds": 75.0
           },
           {
             "prefill": 4,
-            "decode": 9,
-            "seconds": 75.0
-          },
-          {
-            "prefill": 4,
-            "decode": 14,
-            "seconds": 65.0
+            "decode": 11,
+            "seconds": 55.0
           },
           {
             "prefill": 1,
             "decode": 6,
-            "seconds": 65.0
+            "seconds": 55.0
           },
           {
-            "prefill": 4,
-            "decode": 6,
-            "seconds": 50.0
+            "prefill": 9,
+            "decode": 4,
+            "seconds": 40.0
+          },
+          {
+            "prefill": 5,
+            "decode": 10,
+            "seconds": 40.0
           },
           {
             "prefill": 3,
-            "decode": 6,
-            "seconds": 50.0
+            "decode": 13,
+            "seconds": 35.0
           },
           {
             "prefill": 1,
             "decode": 4,
-            "seconds": 50.0
-          },
-          {
-            "prefill": 2,
-            "decode": 10,
-            "seconds": 45.0
-          },
-          {
-            "prefill": 7,
-            "decode": 3,
-            "seconds": 35.0
-          },
-          {
-            "prefill": 4,
-            "decode": 7,
-            "seconds": 35.0
-          },
-          {
-            "prefill": 3,
-            "decode": 10,
             "seconds": 35.0
           },
           {
             "prefill": 5,
-            "decode": 7,
+            "decode": 2,
             "seconds": 30.0
           },
           {
-            "prefill": 4,
-            "decode": 5,
+            "prefill": 1,
+            "decode": 3,
             "seconds": 25.0
           },
           {
-            "prefill": 1,
-            "decode": 5,
+            "prefill": 4,
+            "decode": 7,
             "seconds": 20.0
           },
           {
             "prefill": 2,
-            "decode": 5,
-            "seconds": 20.0
-          },
-          {
-            "prefill": 5,
-            "decode": 11,
-            "seconds": 20.0
-          },
-          {
-            "prefill": 5,
-            "decode": 10,
-            "seconds": 20.0
-          },
-          {
-            "prefill": 1,
-            "decode": 3,
-            "seconds": 20.0
+            "decode": 14,
+            "seconds": 15.0
           },
           {
             "prefill": 1,
             "decode": 2,
-            "seconds": 16.73400000000038
+            "seconds": 15.0
           },
           {
             "prefill": 8,
             "decode": 8,
-            "seconds": 15.0
-          },
-          {
-            "prefill": 3,
-            "decode": 3,
-            "seconds": 15.0
-          },
-          {
-            "prefill": 7,
-            "decode": 10,
-            "seconds": 15.0
-          },
-          {
-            "prefill": 4,
-            "decode": 10,
-            "seconds": 15.0
+            "seconds": 10.0
           },
           {
             "prefill": 3,
@@ -24605,61 +24572,56 @@
             "seconds": 10.0
           },
           {
-            "prefill": 9,
-            "decode": 3,
-            "seconds": 10.0
-          },
-          {
             "prefill": 5,
-            "decode": 3,
+            "decode": 5,
             "seconds": 10.0
           },
           {
             "prefill": 2,
-            "decode": 11,
-            "seconds": 10.0
-          },
-          {
-            "prefill": 4,
-            "decode": 3,
-            "seconds": 5.0
-          },
-          {
-            "prefill": 9,
-            "decode": 8,
-            "seconds": 5.0
-          },
-          {
-            "prefill": 6,
-            "decode": 11,
-            "seconds": 5.0
-          },
-          {
-            "prefill": 4,
             "decode": 13,
-            "seconds": 5.0
+            "seconds": 10.0
+          },
+          {
+            "prefill": 1,
+            "decode": 5,
+            "seconds": 10.0
           },
           {
             "prefill": 4,
-            "decode": 12,
+            "decode": 3,
             "seconds": 5.0
           },
           {
-            "prefill": 2,
-            "decode": 4,
+            "prefill": 3,
+            "decode": 5,
             "seconds": 5.0
           },
           {
-            "prefill": 6,
-            "decode": 9,
+            "prefill": 3,
+            "decode": 10,
             "seconds": 5.0
           },
           {
             "prefill": 1,
             "decode": 1,
-            "seconds": 0.0
+            "seconds": 1.7340000000003783
           }
         ]
+      },
+      "sla": {
+        "ttft_ms": 2000,
+        "itl_ms": 50
+      },
+      "metrics": {
+        "goodput_per_gpu": 0.10956787788897261,
+        "goodput_rps": 16.14826132334705,
+        "good_rate": 0.3923591755099007,
+        "gpu_hours": 294.4242880849951,
+        "mean_ttft_ms": 25761.233794537056,
+        "p99_ttft_ms": 254785.9785219999,
+        "mean_itl_ms": 40.71192837050604,
+        "oscillation_count": 48,
+        "scale_events": 102
       }
     },
     "D-HT-L03-planner": {

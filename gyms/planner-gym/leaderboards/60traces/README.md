@@ -28,6 +28,11 @@ Campaign preparation uses the current Static runtime and peak-memory measurement
 in `static-latency.json` for execution resource estimates.
 There are 360 main outcomes. Paid JEV is excluded.
 
+`Cognitive Agent` is the leaderboard name of the scaling agent built around the
+open KnowLine-31B decision model. Planner keys, saved run labels, result sources
+and identity checks keep the model's name (`knowline31b`, `KnowLine-31B`,
+`KnowLine`).
+
 The builder validates trace fingerprints, complete request counts, SLOs,
 measurement windows, worker limits, normalization and KnowLine model identity.
 It rejects duplicates, missing case/controller records, partial traces and stale

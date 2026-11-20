@@ -3,12 +3,19 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# KnowLine-31B decision model
+# Cognitive Agent: the KnowLine-31B scaling agent
 
-The benchmark serves `PelaAI/KnowLine-31B-Gen1` locally at revision
+Cognitive Agent is the leaderboard name of the scaling agent built around the
+open decision model `PelaAI/KnowLine-31B-Gen1`. The model's weights and its
+author's serving code are used unchanged. The agent adds everything described
+here: the observations, the feasible fleet options, the objective, the decision
+rules and the recorded evidence.
+
+The benchmark serves the model locally at revision
 `8f052a8130e599b53e5324c34f0f5ff90696e1c6`. The replay adapter uses the
-`jev` protocol name internally, with `provider: self_hosted`; the result name is
-`KnowLine-31B`. It sends no paid API calls. Installation, resource requirements,
+`jev` protocol name internally, with `provider: self_hosted`. Saved run labels
+remain `KnowLine-31B`; the leaderboard shows `Cognitive Agent`. It sends no
+paid API calls. Installation, resource requirements,
 parallel node queues and continuation commands are in [comparison-60.md](comparison-60.md).
 
 ## Joint fleet actions

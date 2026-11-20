@@ -6,10 +6,16 @@ SPDX-License-Identifier: Apache-2.0
 # Reproducing the saved benchmark
 
 The saved `efficiency-plus3-20261106` campaign contains 360 completed outcomes:
-60 each for cloudAI-MPC, Dynamo, KEDA, Reactive, Static and KnowLine-31B.
+60 each for cloudAI-MPC, Dynamo, KEDA, Reactive, Static and Cognitive Agent.
 Its common maximum is the original Static GPU allocation plus three times the
 largest worker GPU cost. Starting fleets remain original; active, starting and
 draining workers all consume that maximum. The fixed Static fleet does not grow.
+
+The 60 cloudAI-MPC outcomes were replayed again on 2026-11-19 with the
+controller in this branch, after five corrections to its planning model
+([cloudAI-MPC](mpc.md)). Traces, case configurations, resource policy and the
+native runtime build are those of the campaign; the other 300 outcomes are
+unchanged.
 
 ## Rebuild and verify the current results
 

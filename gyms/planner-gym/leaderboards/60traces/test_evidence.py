@@ -8,7 +8,12 @@ from pathlib import Path
 
 import yaml
 from autoscaling_arena.resource_policy import case_resources
-from build_leaderboards import KNOWLINE_MODEL, KNOWLINE_REVISION, PLANNERS
+from build_leaderboards import (
+    KNOWLINE_MODEL,
+    KNOWLINE_REVISION,
+    KNOWLINE_RUN_LABEL,
+    PLANNERS,
+)
 
 ROOT = Path(__file__).parent
 
@@ -127,7 +132,11 @@ def completed_record(planner="mpc", case_id="A-HT-S01", *, policy=None):
         "results": [
             {
                 "status": "ok",
-                "autoscaler": PLANNERS[planner],
+                "autoscaler": (
+                    KNOWLINE_RUN_LABEL
+                    if planner == "knowline31b"
+                    else PLANNERS[planner]
+                ),
                 "autoscaler_type": "jev" if planner == "knowline31b" else planner,
                 "metrics": copy.deepcopy(static["result"]["metrics"]),
                 "raw_metrics": copy.deepcopy(static["result"]["raw_metrics"]),

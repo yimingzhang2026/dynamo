@@ -8,7 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 This directory contains the replay runners, controllers, KnowLine serving and
 GPU campaign tools, result import, analysis, and offline HTML generation.
 The saved tables contain all 360 results for cloudAI-MPC, Dynamo, KEDA, Reactive,
-Static, and KnowLine-31B on 30 aggregated and 30 disaggregated traces. The shared
+Static, and Cognitive Agent on 30 aggregated and 30 disaggregated traces.
+Cognitive Agent is the scaling agent built around the open KnowLine-31B decision
+model ([details](docs/knowline.md)). The shared
 ceiling is **the original Static GPU allocation + 3 × the largest per-worker GPU
 cost**. All planners start at that original fleet;
 Static holds it fixed. Dynamic planners have a minimum of one worker per active
@@ -37,8 +39,8 @@ Every planner completed all 30 traces; all 30 enter the comparison.
 
 | Position | Planner | Mean rank ↓ | Wins ↑ | Mean good rate ↑ | Simulated GPU-hours |
 | ---: | --- | ---: | ---: | ---: | ---: |
-| 1 | KnowLine-31B | 2.467 | 5.00 | 58.26% | 20,011.3 |
-| 2 | cloudAI-MPC | 2.700 | 7.50 | 57.32% | 18,719.4 |
+| 1 | Cognitive Agent | 2.467 | 5.00 | 58.26% | 20,011.3 |
+| 2 | cloudAI-MPC | 2.700 | 7.50 | 57.43% | 18,821.9 |
 | 3 | Static | 2.733 | 10.50 | 63.93% | 27,718.9 |
 | 4 | Dynamo | 3.733 | 5.00 | 81.57% | 30,488.8 |
 | 5 | KEDA | 4.500 | 0.00 | 28.46% | 13,084.4 |
@@ -50,12 +52,12 @@ Every planner completed all 30 traces; all 30 enter the comparison.
 
 | Position | Planner | Mean rank ↓ | Wins ↑ | Mean good rate ↑ | Simulated GPU-hours |
 | ---: | --- | ---: | ---: | ---: | ---: |
-| 1 | cloudAI-MPC | 2.483 | 12.00 | 76.74% | 18,802.0 |
+| 1 | cloudAI-MPC | 2.517 | 12.00 | 76.93% | 18,787.5 |
 | 2 | Dynamo | 3.017 | 6.50 | 62.30% | 15,490.7 |
-| 3 | KnowLine-31B | 3.333 | 2.00 | 79.78% | 23,525.8 |
+| 3 | Cognitive Agent | 3.333 | 2.00 | 79.78% | 23,525.8 |
 | 4 | Static | 3.433 | 5.83 | 65.53% | 23,897.4 |
 | 5 | Reactive | 3.967 | 2.33 | 61.60% | 19,162.5 |
-| 6 | KEDA | 4.767 | 1.33 | 64.09% | 21,337.6 |
+| 6 | KEDA | 4.733 | 1.33 | 64.09% | 21,337.6 |
 
 Per-trace results: [aggregated CSV](leaderboards/60traces/aggregated-runs.csv)
 and [disaggregated CSV](leaderboards/60traces/disaggregated-runs.csv).
