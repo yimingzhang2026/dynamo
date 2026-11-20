@@ -42,7 +42,10 @@ from autoscaling_arena.adapters.outcome_feedback import (
     LatencyCalibration,
     OutcomeFeedback,
 )
-from autoscaling_arena.policy_contracts import POLICY_CONTRACTS
+from autoscaling_arena.policy_contracts import (
+    FEEDBACK_TELEMETRY_INTERVAL_S,
+    POLICY_CONTRACTS,
+)
 
 from dynamo.planner.core.types import (
     PlannerEffects,
@@ -378,6 +381,7 @@ class AISCapacityModel(CapacityModel):
     def _ensure_loaded(self) -> None:
         if self._session is not None:
             return
+        # Imported on first use: the roofline model runs without the AIS wrapper.
         from dynamo._internal.ais import create_session
 
         prefill_session = create_session(dict(self._config))
@@ -549,7 +553,7 @@ class MPCAutoscaler(_NoopRegressionBootstrap):
     """MPC over a capacity model with pending replicas and guarded scale-down."""
 
     consumes_replay_telemetry = True
-    telemetry_interval_s = 5.0
+    telemetry_interval_s = FEEDBACK_TELEMETRY_INTERVAL_S
     policy_contract = POLICY_CONTRACTS["mpc"]
 
     def __init__(

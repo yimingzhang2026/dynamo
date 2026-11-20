@@ -59,7 +59,9 @@ an untried fleet. Performance must be checked on validation history.
 Scale-up uses the mean forecast. Scale-down requires no pending replicas and a
 smaller fleet that remains below 75% utilization, half the TTFT limit and the
 calibrated ITL limit under
-the 80th-percentile forecast for a full cold-start interval. A queue-spike
+the 80th-percentile forecast at every plan step. That check must hold on
+`ceil(cold_start_s / poll_interval_s)` consecutive decisions (at least one)
+before the fleet shrinks. A queue-spike
 response accounts for capacity already starting. The initial fleet stays in
 place until a positive-duration traffic observation is available; an empty
 startup snapshot is not evidence of zero demand.
@@ -90,23 +92,44 @@ plan/SLO bounds.
 | Setting | Purpose |
 |---|---|
 | `forward_model` | `ais` for the configured performance model; `roofline` for an analytical approximation |
-| `slo_ttft_ms`, `slo_itl_ms` | Controller latency targets; explicitly match the case's scoring profile |
-| `poll_interval_s`, `horizon` | Decision cadence and planning horizon beyond cold start |
+| `slo_ttft_ms`, `slo_itl_ms` | Controller latency targets; they must equal every SLO profile in the Match Config |
+| `poll_interval_s`, `horizon` | Decision cadence (a multiple of the 5-second telemetry interval) and planning horizon beyond cold start |
 | `min_replicas`, `max_replicas` | Candidate bounds; applied to each pool in disaggregated mode |
-| `cold_start_s` | Replica startup delay; explicitly match the engine's runtime setting |
+| `cold_start_s` | Replica startup delay, filled from the decode or aggregate engine's `cold_start_delay_s` if omitted; a set value must equal the engine's delay |
 | `scale_up_penalty`, `scale_down_penalty` | Optional switching costs |
 | `rho_min`, `rho_window_s` | Efficiency weight floor (default `1e-6`) and measured trailing window; also the startup model's smoothing window |
 | `reactive_queue_threshold` | Threshold for the queue-spike floor |
-| `gpus_per_worker` | Aggregate/decode worker cost, filled from the backend if omitted |
-| `prefill_gpus_per_worker`, `kv_transfer_gbps`, `kv_bytes_per_token` | Disaggregated prefill cost and transfer parameters, filled from the engine where available |
+| `gpus_per_worker` | Aggregate/decode worker cost, filled from the engine if omitted; a set value must equal the engine's GPU count |
+| `prefill_gpus_per_worker`, `kv_transfer_gbps`, `kv_bytes_per_token` | Disaggregated prefill cost and transfer parameters, filled from the engine where available; a set prefill cost must equal the engine's GPU count |
 
 Match Config defaults are a 5-second cadence, horizon 5, bounds 1–8, and
 controller targets 300 ms TTFT / 50 ms ITL. Switching penalties default to
 1.5 for scale-up and 10 for scale-down through Match Config; set both to zero
-when the scale-down rule should supply all hysteresis. The controller's
-cold-start default is 30 seconds. These are generic defaults, not the settings
-of every benchmark case. Set targets, startup delay and replica limits
-explicitly when adding MPC to a case.
+when the scale-down rule should supply all hysteresis. These are generic
+defaults. Set the latency targets and replica limits explicitly when adding
+MPC to a case.
+
+Match Config validates what the controller cannot handle at run time. The
+controller plans against one TTFT/ITL pair, so `slo_ttft_ms` and `slo_itl_ms`
+must equal every SLO profile, and a profile with an end-to-end target is
+rejected. The starting fleet must fit `backend.gpu_budget`. In disaggregated
+mode `max_replicas` may be larger than both pools could reach together,
+because the controller chooses only among the pairs that fit the budget; an
+aggregated `max_replicas` the budget cannot hold is rejected unless
+`backend.worker_limits` bounds the fleet. Worker GPU costs
+must match the deployed engines, so the controller scores the GPU-seconds
+replay charges. The controller plans with one cold-start delay, so a
+disaggregated match whose prefill and decode engines have different
+`cold_start_delay_s` is rejected, and so is a `cold_start_s` that differs from
+the engine's delay or an engine delay set to `null`.
+`poll_interval_s` must be a multiple of the telemetry interval, and
+`backend.replay.telemetry_sample_interval_s` must be 5; both are checked by
+`--validate-only`.
+
+`forward_model: ais` uses the AISimulate identity of the configured engines
+and does not follow a custom `extra_args.timing_model`. Where AISimulate has
+no estimate for an operating point, the controller logs a warning and uses the
+analytical roofline for that point.
 
 In disaggregated mode, separate AIS sessions predict prefill and decode using
 each pool's deployed role and engine parallelism. Aggregate workers reuse one
