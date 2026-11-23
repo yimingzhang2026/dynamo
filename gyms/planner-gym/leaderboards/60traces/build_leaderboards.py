@@ -16,10 +16,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from autoscaling_arena.resource_policy import (
     case_resources,
     resource_policy_description,
 )
+from extract_timelines import bucket_grid, timeline_jobs, validate_timeline
 
 PLANNERS = {
     "mpc": "cloudAI-MPC",
@@ -34,6 +36,14 @@ CORE = ("mpc", "planner", "keda", "reactive", "static", "knowline31b")
 KNOWLINE_RUN_LABEL = "KnowLine-31B"
 KNOWLINE_MODEL = "PelaAI/KnowLine-31B-Gen1"
 KNOWLINE_REVISION = "8f052a8130e599b53e5324c34f0f5ff90696e1c6"
+PAGES = [
+    ("index.html", None),
+    ("aggregated.html", "agg"),
+    ("disaggregated.html", "disagg"),
+    ("latency.html", "latency"),
+    ("slo-rankings.html", "slo-ranking"),
+]
+TRACE_PAGE = ("traces.html", "trace")
 
 
 def finite(value):
@@ -930,6 +940,101 @@ def make_report(inputs, *, include_diagnostics=True):
     return report
 
 
+def make_trace_view(inputs, report):
+    """Per-trace metrics and time series for the Traces tab; ranks never read them.
+
+    Arriving requests come from the benchmark traces. A planner's behavior over
+    time comes from the telemetry of exactly the selected result; runs without
+    imported telemetry have no series.
+    """
+    cases = {
+        c["case_id"]: c for page in report["pages"].values() for c in page["cases"]
+    }
+    manifest = []
+
+    def read(name):
+        data = (inputs / name).read_bytes()
+        manifest.append(
+            {
+                "path": "inputs/" + name,
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
+        return json.loads(data)
+
+    arrivals = read("arrivals.json")["cases"]
+    if set(arrivals) != set(cases):
+        raise ValueError("Arrivals must cover every trace exactly")
+    for case_id, saved in arrivals.items():
+        case = cases[case_id]
+        width, count = bucket_grid(case["duration_s"])
+        counts = saved["counts"]
+        if (
+            saved["trace_sha256"] != case["trace_sha256"]
+            or saved["bucket_s"] != width
+            or len(counts) != count
+            or any(type(v) is not int or v < 0 for v in counts)
+            or sum(counts) != case["requests"]
+        ):
+            raise ValueError("Arrivals differ from the benchmark trace: " + case_id)
+    raw = {
+        r["job_id"]: r["report"]["results"][0]["raw_metrics"]
+        for r in json.loads((inputs / "results.json").read_text())["records"]
+        if r.get("saved_status") == "completed"
+    }
+    raw.update(
+        {
+            r["result"]["case_id"] + "-static": r["result"]["raw_metrics"]
+            for r in json.loads((inputs / "static-latency.json").read_text())["records"]
+            if r["result"].get("status") == "completed"
+        }
+    )
+    jobs = {job["job_id"]: job for job in timeline_jobs(report)}
+    details = {}
+    for job_id, job in jobs.items():
+        saved = raw[job_id]
+        row = cases[job["case_id"]]["rows"][job["planner"]]
+        (profile,) = saved["profiles"].values()
+        if not close(
+            saved["average_gpus"] * job["duration_s"] / 3600,
+            row["metrics"]["gpu_hours"],
+        ) or not close(profile["good_rate"], row["metrics"]["good_rate"]):
+            raise ValueError("Saved measurements disagree with the score: " + job_id)
+        details[job_id] = {
+            "average_gpus": saved["average_gpus"],
+            "good_requests": profile["good_count"],
+            "p95_ttft_ms": saved["p95_ttft_ms"],
+            "p95_e2e_latency_ms": saved["p95_e2e_latency_ms"],
+            "oscillation_count": saved["oscillation_count"],
+            "scale_events": saved["scale_events"],
+        }
+    timelines = {}
+    if (inputs / "timelines.json").exists():
+        for job_id, saved in read("timelines.json")["runs"].items():
+            reason = (
+                validate_timeline(saved, jobs[job_id])
+                if job_id in jobs
+                else "it is not a selected result"
+            )
+            if reason:
+                raise ValueError(f"Timeline of {job_id} rejected: {reason}")
+            timelines[job_id] = saved["series"]
+    return {
+        "arrivals": {
+            case_id: {"bucket_s": saved["bucket_s"], "counts": saved["counts"]}
+            for case_id, saved in arrivals.items()
+        },
+        "details": details,
+        "timelines": timelines,
+        "timeline_runs": {
+            planner: sum(jobs[key]["planner"] == planner for key in timelines)
+            for planner in CORE
+        },
+        "input_manifest": manifest,
+    }
+
+
 def write_csv(path, rows, fields):
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -937,7 +1042,7 @@ def write_csv(path, rows, fields):
         writer.writerows(rows)
 
 
-def export(report, output):
+def export(report, output, trace_view=None):
     output.mkdir(parents=True, exist_ok=True)
     (output / "leaderboards.json").write_text(
         json.dumps(report, indent=2, allow_nan=False) + "\n"
@@ -1112,41 +1217,54 @@ def export(report, output):
             "case_budget_mismatches": supplement["budget_mismatches"],
             "input_manifest": supplement["input_manifest"],
         }
+    if trace_view:
+        validation["trace_view"] = {
+            "arrival_series": len(trace_view["arrivals"]),
+            "timeline_runs": trace_view["timeline_runs"],
+            "input_manifest": trace_view["input_manifest"],
+        }
     (output / "validation.json").write_text(
         json.dumps(validation, indent=2, allow_nan=False) + "\n"
     )
 
 
-def render(report, template, selected):
+def render(report, template, selected, extra=None):
     payload = (
-        json.dumps({"report": report, "selected": selected}, allow_nan=False)
+        json.dumps(
+            {"report": report, "selected": selected, **(extra or {})}, allow_nan=False
+        )
         .replace("<", "\\u003c")
         .replace("&", "\\u0026")
     )
     return template.replace("__REPORT_DATA__", payload)
 
 
-def write_report(report, output, *, data_only=False):
-    export(report, output)
+def write_pages(report, output, trace_view=None):
+    """Every page links the Traces tab only when that page is written."""
+    template = Path(__file__).with_name("leaderboard.html").read_text()
+    linked = {"trace_page": True} if trace_view else None
+    for filename, selected in PAGES:
+        (output / filename).write_text(render(report, template, selected, linked))
+    if trace_view:
+        filename, selected = TRACE_PAGE
+        (output / filename).write_text(
+            render(report, template, selected, {**linked, "traces": trace_view})
+        )
+
+
+def write_report(report, output, *, data_only=False, trace_view=None):
+    export(report, output, trace_view)
     if not data_only:
-        template = Path(__file__).with_name("leaderboard.html").read_text()
-        for filename, selected in [
-            ("index.html", None),
-            ("aggregated.html", "agg"),
-            ("disaggregated.html", "disagg"),
-            ("latency.html", "latency"),
-            ("slo-rankings.html", "slo-ranking"),
-        ]:
-            (output / filename).write_text(render(report, template, selected))
+        write_pages(report, output, trace_view)
 
 
-def check_report(report, output, *, data_only=False):
+def check_report(report, output, *, data_only=False, trace_view=None):
     """Rebuild with the saved timestamp and compare every generated byte."""
     saved = json.loads((output / "leaderboards.json").read_text())
     report = {**report, "generated_at": saved["generated_at"]}
     with tempfile.TemporaryDirectory(prefix="planner-report-check-") as directory:
         stage = Path(directory)
-        write_report(report, stage, data_only=data_only)
+        write_report(report, stage, data_only=data_only, trace_view=trace_view)
         mismatches = [
             path.name
             for path in sorted(stage.iterdir())
@@ -1171,10 +1289,11 @@ def main():
     )
     args = parser.parse_args()
     report = make_report(args.inputs)
+    trace_view = make_trace_view(args.inputs, report)
     if args.check:
-        check_report(report, args.out, data_only=args.data_only)
+        check_report(report, args.out, data_only=args.data_only, trace_view=trace_view)
     else:
-        write_report(report, args.out, data_only=args.data_only)
+        write_report(report, args.out, data_only=args.data_only, trace_view=trace_view)
     print(
         json.dumps(
             {

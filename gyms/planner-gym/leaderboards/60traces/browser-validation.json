@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-11-20T00:22:54.313Z",
+  "checked_at": "2026-11-23T18:16:29.204Z",
   "checks": [
     {
       "page": "index.html",
@@ -19,6 +19,10 @@
     },
     {
       "page": "slo-rankings.html",
+      "status": "passed"
+    },
+    {
+      "page": "traces.html",
       "status": "passed"
     }
   ],

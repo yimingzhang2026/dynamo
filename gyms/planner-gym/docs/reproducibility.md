@@ -25,7 +25,7 @@ From `gyms/planner-gym`, with Python 3.11 or 3.12:
 python leaderboards/60traces/build_leaderboards.py --check
 ```
 
-This validates the committed compact evidence, rebuilds all five HTML pages and
+This validates the committed compact evidence, rebuilds all six HTML pages and
 the JSON/CSV analysis in a temporary directory, and compares every generated
 byte to the saved files. It uses the saved generation timestamp for this
 comparison. It needs no installed replay package, raw traces, GPU, model or

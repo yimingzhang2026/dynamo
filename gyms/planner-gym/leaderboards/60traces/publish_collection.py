@@ -168,7 +168,12 @@ def build(collection, output, *, campaign=CAMPAIGN, source_sha256=SOURCE_SHA256)
             ),
             "Incomplete ranking coverage",
         )
-        publish(report, stage)
+        # The Traces tab keeps its series: arrivals belong to the traces, and a
+        # planner's series is dropped when its result was replaced.
+        for name in ("arrivals.json", "timelines.json"):
+            if (output / "inputs" / name).is_file():
+                shutil.copyfile(output / "inputs" / name, inputs / name)
+        publish(report, stage, inputs)
         shutil.rmtree(timelines)
         shutil.copyfile(CODE / "check_browser.mjs", stage / "check_browser.mjs")
         receipt = {

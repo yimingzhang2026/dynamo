@@ -14,9 +14,58 @@ checkout, or use GitHub's **Download raw file** button and open the saved file
 in your browser. GitHub's repository file viewer displays HTML source rather
 than running the dashboard. The downloaded report works offline without a server.
 
-Run `python build_leaderboards.py` to regenerate the five standalone pages:
+Run `python build_leaderboards.py` to regenerate the six standalone pages:
 `index.html`, `aggregated.html`, `disaggregated.html`, `latency.html`,
-and `slo-rankings.html`. They work offline.
+`slo-rankings.html` and `traces.html`. They work offline.
+
+## Traces tab
+
+`traces.html` shows one trace at a time: a leaderboard of the six planners on
+that trace, ranked by goodput per GPU, with good rate, goodput, GPU hours,
+average GPUs, mean/P95/P99 TTFT, mean ITL, P95 end-to-end latency, oscillations
+and scale events; and the behavior of each planner over the time of the trace.
+Its numbers are the saved results; its two series inputs never enter a score.
+
+`inputs/arrivals.json` holds the requests arriving per time bucket in each
+benchmark trace, on the replay clock (replay starts at the first arrival). It is
+checked against each trace's fingerprint and full request count. Rebuild it from
+the expanded traces with:
+
+```bash
+python extract_timelines.py arrivals --traces ../../data/60traces/reproduction/generated
+```
+
+`inputs/timelines.json` holds, per run, the bucketed queue length, TTFT, ITL,
+KV cache utilization, prefix cache reuse, ready workers and provisioned GPUs
+from the telemetry that run saved. A run without an entry has no curve: the page
+names the planners it has no series for, and draws Static's fixed fleet as
+constants. A series is accepted only for the selected result: its source must
+be the result file with the selected SHA-256, or the telemetry file with the
+SHA-256 that result recorded, and its arrivals must add up to the trace's
+requests. Replacing a result drops its series.
+
+The series are reduced where the raw results are; no simulation is started:
+
+```bash
+python extract_timelines.py manifest --output timeline-manifest.json
+# on the machine holding the raw results (Python 3.8+, standard library):
+python3 extract_timelines.py reduce --manifest timeline-manifest.json \
+    --search <campaign-directory> --output timelines
+# back in this directory, with timelines/ copied over:
+python extract_timelines.py import timelines
+python build_leaderboards.py
+```
+
+`reduce` searches the given directories for `results.json`, `telemetry.jsonl`
+and `session.tar.gz` files, matches them to selected results by content, and
+writes `summary.json` listing the runs it found none for. `collect_timelines.sh
+HOST REMOTE_PYTHON SEARCH_DIR...` runs these steps over SSH.
+
+A trace has at most 600 points (150 s each for a 24-hour trace). Each point is
+a mean over its time bucket: gauges are averaged over time, latency over the
+requests that produced it.
+
+## Inputs and validation
 
 `inputs/results.json` contains one current record for each of 300 dynamic jobs.
 Unfinished replacements contain no previous result or score. `plan.json` defines
@@ -84,7 +133,7 @@ audit and preserves the full-trace metrics and hashes.
 
 `publish_collection.py <collection-directory>` verifies every file against the
 CPU and KnowLine transfer manifests, validates all 360 results, reconstructs
-portable inputs, refreshes diagnoses, and writes all five pages. Its defaults
+portable inputs, refreshes diagnoses, and writes the pages. Its defaults
 identify the current `efficiency-plus3-20261106` source snapshot. The bundled
 evidence is optional for HTML regeneration: `inputs/` is self-contained.
 
@@ -107,4 +156,5 @@ draining worker IDs, and publication requires its audit receipt.
 
 Run `python -m pytest -q test_leaderboards.py` for evidence and ranking checks.
 `CHROME_ENDPOINT=http://127.0.0.1:9222 node check_browser.mjs` checks all tabs,
-filters, dialogs, rank calculations, latency colors and mobile layouts.
+filters, dialogs, rank calculations, latency colors, the per-trace tables and
+charts, and mobile layouts.

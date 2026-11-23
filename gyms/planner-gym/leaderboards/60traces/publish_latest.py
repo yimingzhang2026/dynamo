@@ -8,7 +8,14 @@ import argparse
 import json
 from pathlib import Path
 
-from build_leaderboards import export, make_report, render, validate_record
+from build_leaderboards import (
+    TRACE_PAGE,
+    make_report,
+    make_trace_view,
+    validate_record,
+    write_report,
+)
+from extract_timelines import import_timelines
 from import_results import experiment_setup, portable, static_entry
 
 ROOT = Path(__file__).parent
@@ -259,19 +266,19 @@ def refresh_diagnostics(inputs, report, directories=()):
     write(inputs / "diagnostic-evidence.json", {"runs": evidence})
 
 
-def publish(report, output):
+def publish(report, output, inputs=None):
+    """Write the pages; the Traces tab needs the arrival series in `inputs`."""
     for obsolete in ("knowline-vs-jev.html", "knowline-vs-jev.csv"):
         (output / obsolete).unlink(missing_ok=True)
-    export(report, output)
-    template = (ROOT / "leaderboard.html").read_text()
-    for filename, selected in [
-        ("index.html", None),
-        ("aggregated.html", "agg"),
-        ("disaggregated.html", "disagg"),
-        ("latency.html", "latency"),
-        ("slo-rankings.html", "slo-ranking"),
-    ]:
-        (output / filename).write_text(render(report, template, selected))
+    trace_view = None
+    if inputs is not None and (inputs / "arrivals.json").exists():
+        if (inputs / "timelines.json").exists():
+            # A replaced result no longer has a time series.
+            import_timelines(None, inputs)
+        trace_view = make_trace_view(inputs, report)
+    else:
+        (output / TRACE_PAGE[0]).unlink(missing_ok=True)
+    write_report(report, output, trace_view=trace_view)
 
 
 def main():
@@ -286,9 +293,9 @@ def main():
         args.exports,
         diagnostics=args.diagnostics,
     )
-    publish(report, ROOT)
+    publish(report, ROOT, args.inputs)
     if args.mirror:
-        publish(report, args.mirror)
+        publish(report, args.mirror, args.inputs)
     print(json.dumps(report["evidence_counts"]))
 
 
