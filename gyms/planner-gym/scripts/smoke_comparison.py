@@ -15,15 +15,13 @@ from pathlib import Path
 
 import yaml
 from autoscaling_arena.match_config import load_match_config
+from autoscaling_arena.resource_policy import case_resources
 from prepare_comparison import HEADER, ROOT, SOURCE, make_config
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "runs/native-smoke")
-    parser.add_argument(
-        "--include-jev", action="store_true", help="include live JEV API smoke calls"
-    )
     parser.add_argument(
         "--include-knowline",
         action="store_true",
@@ -34,13 +32,9 @@ def main() -> int:
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     policy = yaml.safe_load((SOURCE / "comparison.yaml").read_text())
-    policy["jev"]["max_calls"] = 10
     policy["knowline"]["max_calls"] = 10
     planners = [
-        p
-        for p in policy["planners"]
-        if (p != "jev" or args.include_jev)
-        and (p != "knowline31b" or args.include_knowline)
+        p for p in policy["planners"] if p != "knowline31b" or args.include_knowline
     ]
     trace = output / "synthetic.jsonl"
     with trace.open("x") as stream:
@@ -72,6 +66,7 @@ def main() -> int:
                 "id": f"smoke-{group}-{planner}",
                 "case_id": case,
                 "planner": planner,
+                "resources": case_resources(base, policy),
                 "timeout_s": 600,
                 "memory_gib": 5,
             }

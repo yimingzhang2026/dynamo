@@ -464,3 +464,26 @@ def test_rolling_refills_a_finished_slot_before_other_jobs_finish(
     assert set(json.loads((tmp_path / "status.json").read_text())["jobs"].values()) == {
         "completed"
     }
+
+
+def test_native_smoke_prepares_every_cpu_planner_on_every_layout(tmp_path, monkeypatch):
+    """The host-side smoke check must follow the current comparison policy."""
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "smoke_comparison", ROOT / "scripts/smoke_comparison.py"
+    )
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    monkeypatch.setattr(
+        "sys.argv", ["smoke_comparison.py", "--output", str(tmp_path / "smoke")]
+    )
+    assert smoke.main() == 0  # prepares and validates the configs; runs nothing
+    names = sorted(p.stem for p in (tmp_path / "smoke").glob("smoke-*.yaml"))
+    assert len(names) == 20
+    assert {name.rsplit("-", 1)[1] for name in names} == {
+        "mpc",
+        "planner",
+        "keda",
+        "reactive",
+        "static",
+    }
