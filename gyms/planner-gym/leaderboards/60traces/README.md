@@ -5,14 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # 60-trace results and analysis
 
-**[View the results tables in the Planner Gym README](../../README.md#saved-results).**
-They render directly on GitHub, with aggregated and disaggregated rankings for
-all six planners.
+**[The Planner Gym README explains every tab with figures](../../README.md#reading-each-tab)**
+and shows the [current standings](../../README.md#current-standings). This page
+covers what is behind the report: its inputs, validation and maintenance.
 
-For the interactive dashboard, open [index.html](index.html) from a local
+For the interactive report, open [index.html](index.html) from a local
 checkout, or use GitHub's **Download raw file** button and open the saved file
 in your browser. GitHub's repository file viewer displays HTML source rather
-than running the dashboard. The downloaded report works offline without a server.
+than running the report. The downloaded report works offline without a server.
 
 Run `python build_leaderboards.py` to regenerate the six standalone pages:
 `index.html`, `aggregated.html`, `disaggregated.html`, `latency.html`,
@@ -170,3 +170,8 @@ Run `python -m pytest -q test_leaderboards.py` for evidence and ranking checks.
 filters, dialogs, rank calculations, latency colors, the per-trace tables and
 charts with their zoom and move controls (wheel, drag, touch, keys and buttons),
 and mobile layouts.
+
+`CHROME_ENDPOINT=http://127.0.0.1:9222 node capture_figures.mjs` captures the
+figures of the Planner Gym README from the saved pages, into
+`../../docs/images/leaderboard/`. Each figure is a region of one page with
+numbered marks that the README explains. Run it after publishing results.
