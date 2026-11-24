@@ -5,17 +5,36 @@ SPDX-License-Identifier: Apache-2.0
 
 # Reproducing the saved benchmark
 
-The saved `efficiency-plus3-20261106` campaign contains 360 completed outcomes:
-60 each for cloudAI-MPC, Dynamo, KEDA, Reactive, Static and Cognitive Agent.
-Its common maximum is the original Static GPU allocation plus three times the
-largest worker GPU cost. Starting fleets remain original; active, starting and
-draining workers all consume that maximum. The fixed Static fleet does not grow.
+The saved results are 360 completed outcomes: 60 each for cloudAI-MPC, Dynamo,
+KEDA, Reactive, Static and Cognitive Agent, on the plan of the
+`efficiency-plus3-20261106` campaign. Its common maximum is the original Static
+GPU allocation plus three times the largest worker GPU cost. Starting fleets
+remain original; active, starting and draining workers all consume that
+maximum. The fixed Static fleet does not grow.
 
-The 60 cloudAI-MPC outcomes were replayed again on 2026-11-19 with the
-controller in this branch, after five corrections to its planning model
-([cloudAI-MPC](mpc.md)). Traces, case configurations, resource policy and the
-native runtime build are those of the campaign; the other 300 outcomes are
-unchanged.
+All 360 outcomes were replayed again on 2026-11-23 and 2026-11-24 with the
+source in this branch, and the saved results are these replays. Each replay
+kept its telemetry, which the report's Traces tab reduces to curves; the raw
+telemetry stays outside Git. Traces, case configurations, resource policy and
+the native runtime build are those of the campaign. The cloudAI-MPC controller
+is the one corrected on 2026-11-19 ([cloudAI-MPC](mpc.md)), whose 60 outcomes
+were first replayed that day.
+
+The replays also show how closely the earlier saved results reproduce. A run's
+telemetry fingerprint is the SHA-256 of all its samples.
+
+| Planner | Replays with the same telemetry | Change in goodput per GPU |
+| --- | ---: | --- |
+| cloudAI-MPC | 60 of 60 | none |
+| KEDA | 60 of 60 | none |
+| Reactive | 60 of 60 | none |
+| Cognitive Agent | 60 of 60 | none |
+| Static | no earlier fingerprint | none: all 60 scores are equal |
+| Dynamo | 30 of 60 | the other 30: median 0.19%, at most 2.94% (`D-HT-L02`) |
+
+Dynamo's differences change the ranking on one trace (`A-HT-S04`: Dynamo and
+Static swap fifth and sixth place) and the winner on none. Their cause has not
+been isolated.
 
 ## Rebuild and verify the current results
 
@@ -61,10 +80,13 @@ are preserved. KnowLine uses `PelaAI/KnowLine-31B-Gen1` revision
 `8f052a8130e599b53e5324c34f0f5ff90696e1c6` and the documented serving stack.
 
 Rebuilding the saved leaderboard is exact. Fresh KnowLine inference is a new
-measurement: it uses temperature 1, and model sampling, GPU kernels and measured
-wall latency can vary. Pinning the model and runtime does not promise identical
-decisions or scores. Saved decision prefixes make continuation strict within a
-campaign; the compact leaderboard evidence does not contain every model answer.
+measurement: the server runs at temperature 1, and GPU kernels and measured wall
+latency can vary, so pinning the model and runtime does not promise identical
+decisions or scores. The fresh campaign of 2026-11-23, on the same cluster, did
+reproduce all 60 earlier runs sample for sample over 332,445 decisions; only
+the measured wall latencies differed. Saved decision prefixes make continuation
+strict within a campaign; the compact leaderboard evidence does not contain
+every model answer.
 
 Local source/unit checks and exact report reconstruction do not substitute for
 executing the Linux replay and GPU serving pipeline on a fresh environment.

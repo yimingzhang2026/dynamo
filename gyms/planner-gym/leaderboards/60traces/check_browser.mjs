@@ -81,7 +81,7 @@ try{
    assert.deepEqual(mismatches,[]);
    // A planner's line is its own saved telemetry, or absent: nothing is drawn for a run without a series.
    assert(await evaluate(`allCases.every(c=>report.core.every(p=>{const d=traceData(c).lines[p],t=traces.timelines[c.case_id+'-'+p];return t?d.measured&&d.series===t:p==='static'?d&&!d.measured&&Object.keys(d.series).sort().join()==='gpus,ready_decode,ready_prefill':d===undefined;}))`));
-   // Controls: hiding a planner, the log scale, zooming and resetting, and following the address.
+   // Controls: hiding a planner, the value scales, the period shown by button and key, and following the address.
    const controls=await evaluate(`(async()=>{
     showTrace('D-HT-L01',true);
     const before=traceState.panels.map(p=>p.key).join();
@@ -90,16 +90,76 @@ try{
     document.querySelector('[data-trace-planner="static"]').click();
     const restored=!traceState.hidden.has('static')&&traceState.panels.map(p=>p.key).join()===before;
     document.getElementById('trace-log').click();const log=traceState.log;document.getElementById('trace-log').click();
-    const c=traceCase();traceState.view=[c.duration_s/4,c.duration_s/2];traceBehavior(c);
-    const zoomed=!document.getElementById('trace-reset').disabled&&traceAxis(c).x0===c.duration_s/4;
-    document.getElementById('trace-reset').click();
-    const reset=traceState.view===null&&document.getElementById('trace-reset').disabled;
+    const c=traceCase(),full=c.duration_s,id=name=>document.getElementById(name),shown=(from,to)=>{const [x0,x1]=traceWindow();return Math.abs(x0-from)<1e-6*full&&Math.abs(x1-to)<1e-6*full;};
+    traceSetView(full/4,full/2);
+    const zoomed=!id('trace-reset').disabled&&shown(full/4,full/2)&&id('trace-range').textContent===traceClock(full/4)+' – '+traceClock(full/2)+' ('+traceLength(full/4)+')';
+    const top=p=>traceScale(p).ticks.at(-1),fitted=traceState.panels.map(top);
+    id('trace-fit').click();const whole=traceState.panels.map(top),unfitted=!traceState.fit;id('trace-fit').click();
+    const fit=unfitted&&traceState.fit&&fitted.every((v,i)=>v<=whole[i])&&fitted.some((v,i)=>v<whole[i]);
+    id('trace-in').click();const nearer=shown(full*5/16,full*7/16);
+    id('trace-out').click();const farther=shown(full/4,full/2);
+    id('trace-right').click();const later=shown(full*3/8,full*5/8);
+    for(let i=0;i<4;i++)id('trace-left').click();
+    const earliest=shown(0,full/4)&&id('trace-left').disabled&&!id('trace-right').disabled;
+    const key=name=>id('trace-charts').dispatchEvent(new KeyboardEvent('keydown',{key:name,bubbles:true,cancelable:true}));
+    key('ArrowRight');key('-');const keyed=shown(0,full/2);
+    key('+');key('+');
+    for(let i=0;i<40;i++)id('trace-in').click();
+    const [x0,x1]=traceWindow(),least=Math.abs(x1-x0-4*traceState.data.width)<1e-6*full&&id('trace-in').disabled&&x0>=0&&x1<=full;
+    // The time axis names the moments it marks, whatever the period.
+    const ticks=traceTicks(c,x0,x1,9),labelled=ticks.ticks.length>=2&&ticks.ticks.every(t=>t>=x0-1e-6&&t<=x1+1e-6)&&new Set(ticks.ticks.map(ticks.label)).size===ticks.ticks.length;
+    key('0');
+    const reset=traceState.view===null&&id('trace-reset').disabled&&id('trace-out').disabled&&id('trace-range').textContent.startsWith('Whole trace');
     location.hash='#A-LC-S10';await new Promise(resolve=>setTimeout(resolve,50));
     const followed=traceState.caseId==='A-LC-S10'&&document.getElementById('trace-select').value==='A-LC-S10';
     document.getElementById('trace-next').click();
-    return {hidden,restored,log,zoomed,reset,followed,next:traceState.caseId!=='A-LC-S10'};
+    return {hidden,restored,log,zoomed,fit,nearer,farther,later,earliest,keyed,least,labelled,reset,followed,next:traceState.caseId!=='A-LC-S10'};
    })()`);
-   assert.deepEqual(controls,{hidden:true,restored:true,log:true,zoomed:true,reset:true,followed:true,next:true});
+   assert.deepEqual(controls,{hidden:true,restored:true,log:true,zoomed:true,fit:true,nearer:true,farther:true,later:true,earliest:true,keyed:true,least:true,labelled:true,reset:true,followed:true,next:true});
+   // The pointer itself: the wheel zooms around it and moves sideways, a drag picks a period or moves along
+   // the trace, the strip's window can be dragged, and a double-click returns to the whole trace.
+   await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+   await evaluate(`showTrace('D-HT-L01',true);traceState.panels[0].canvas.scrollIntoView({block:'center'})`);
+   await new Promise(resolve=>setTimeout(resolve,400));
+   const area=await evaluate(`(()=>{const b=traceState.panels[0].canvas.getBoundingClientRect(),n=document.getElementById('trace-nav').getBoundingClientRect();return {left:b.left+traceMargin.left,width:b.width-traceMargin.left-traceMargin.right,y:b.top+b.height/2,strip:n.top+n.height/2,full:traceCase().duration_s};})()`);
+   const at=share=>area.left+area.width*share,view=()=>evaluate(`traceWindow()`);
+   const mouse=(type,x,y,options={})=>call('Input.dispatchMouseEvent',{type,x,y,button:'left',buttons:type==='mouseReleased'?0:1,clickCount:1,...options});
+   const drag=async(from,to,y)=>{await mouse('mousePressed',at(from),y);await mouse('mouseMoved',at((from+to)/2),y);await mouse('mouseMoved',at(to),y);await mouse('mouseReleased',at(to),y);};
+   const close=(actual,expected)=>assert(actual.every((v,i)=>Math.abs(v-expected[i])<2e-3*area.full),JSON.stringify({actual,expected}));
+   await call('Input.dispatchMouseEvent',{type:'mouseWheel',x:at(.25),y:area.y,deltaX:0,deltaY:-120});
+   let shown=await view(),span=shown[1]-shown[0];
+   assert(span<area.full&&span>area.full/2);close([shown[0]+span/4],[area.full/4]);
+   await call('Input.dispatchMouseEvent',{type:'mouseWheel',x:at(.25),y:area.y,deltaX:area.width/10,deltaY:0});
+   close(await view(),[shown[0]+span/10,shown[1]+span/10]);
+   shown=await view();
+   await drag(.25,.75,area.y);
+   close(await view(),[shown[0]+span/4,shown[0]+span*3/4]);
+   shown=await view();span=shown[1]-shown[0];
+   await evaluate(`document.querySelector('[data-trace-mode="pan"]').click()`);
+   assert(await evaluate(`traceState.mode==='pan'&&document.getElementById('trace-charts').classList.contains('pan')&&document.querySelector('[data-trace-mode="pan"]').getAttribute('aria-pressed')==='true'`));
+   await drag(.5,.25,area.y);
+   close(await view(),[shown[0]+span/4,shown[1]+span/4]);
+   shown=await view();
+   await mouse('mousePressed',at(.5),area.y,{modifiers:8});await mouse('mouseMoved',at(.75),area.y,{modifiers:8});await mouse('mouseReleased',at(.75),area.y,{modifiers:8});
+   close(await view(),[shown[0]+span/2,shown[0]+span*3/4]);
+   shown=await view();span=shown[1]-shown[0];
+   const middle=(shown[0]+shown[1])/2/area.full;
+   await drag(middle,middle-.1,area.strip);
+   close(await view(),[shown[0]-area.full/10,shown[1]-area.full/10]);
+   await mouse('mousePressed',at(.9),area.strip);await mouse('mouseReleased',at(.9),area.strip);
+   close(await view(),[area.full*.9-span/2,area.full*.9+span/2]);
+   await evaluate(`document.querySelector('[data-trace-mode="zoom"]').click()`);
+   await mouse('mousePressed',at(.5),area.y);await mouse('mouseReleased',at(.5),area.y);
+   await mouse('mousePressed',at(.5),area.y,{clickCount:2});await mouse('mouseReleased',at(.5),area.y,{clickCount:2});
+   assert(await evaluate(`traceState.view===null&&traceState.mode==='zoom'&&traceState.drag===null`));
+   // Two fingers each keep the moment of the trace they touched, so spreading them zooms in.
+   await call('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:2});
+   const touch=(type,points)=>call('Input.dispatchTouchEvent',{type,touchPoints:points.map(([share,id])=>({x:at(share),y:area.y,id}))});
+   await touch('touchStart',[[.4,1]]);await touch('touchStart',[[.4,1],[.6,2]]);await touch('touchMove',[[.3,1],[.7,2]]);await touch('touchEnd',[]);
+   close(await view(),[area.full/4,area.full*3/4]);
+   await call('Emulation.setTouchEmulationEnabled',{enabled:false});
+   await evaluate(`showTrace('D-HT-L01',true)`);
+   await call('Emulation.clearDeviceMetricsOverride');
   }
   if(filename==='slo-rankings.html')assert(await evaluate(`Object.values(report.pages).every(p=>sloAdjustedRanking(p).case_count===p.views.all.core.shared_cases.length)`));
   await call('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});

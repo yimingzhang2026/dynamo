@@ -26,6 +26,15 @@ average GPUs, mean/P95/P99 TTFT, mean ITL, P95 end-to-end latency, oscillations
 and scale events; and the behavior of each planner over the time of the trace.
 Its numbers are the saved results; its two series inputs never enter a score.
 
+The charts share one time axis that can be zoomed and moved. Scroll over a
+chart to zoom around the pointer. Drag to pick a period or, in "Drag to move"
+or with Shift held, to move along the trace. The buttons and the arrow, `+`,
+`-` and `0` keys do the same, and the strip above the charts shows the whole
+trace with the period as a window that can be dragged or resized. Value axes fit
+the period shown unless "Fit values to period" is cleared. A series has at most
+600 points, one per time bucket (5 seconds to 20 minutes, by trace length), so
+a zoom stops at four points and shows nothing shorter than a bucket.
+
 `inputs/arrivals.json` holds the requests arriving per time bucket in each
 benchmark trace, on the replay clock (replay starts at the first arrival). It is
 checked against each trace's fingerprint and full request count. Rebuild it from
@@ -134,8 +143,10 @@ audit and preserves the full-trace metrics and hashes.
 `publish_collection.py <collection-directory>` verifies every file against the
 CPU and KnowLine transfer manifests, validates all 360 results, reconstructs
 portable inputs, refreshes diagnoses, and writes the pages. Its defaults
-identify the current `efficiency-plus3-20261106` source snapshot. The bundled
-evidence is optional for HTML regeneration: `inputs/` is self-contained.
+identify the source snapshot of the first `efficiency-plus3-20261106` campaign;
+the saved results are later replays of it, published with `publish_latest.py`.
+The bundled evidence is optional for HTML regeneration: `inputs/` is
+self-contained.
 
 `publish_latest.py <export-directory>` imports completed, GPU-audited results
 incrementally and rebuilds the pages. A case/controller key has only its current
@@ -157,4 +168,5 @@ draining worker IDs, and publication requires its audit receipt.
 Run `python -m pytest -q test_leaderboards.py` for evidence and ranking checks.
 `CHROME_ENDPOINT=http://127.0.0.1:9222 node check_browser.mjs` checks all tabs,
 filters, dialogs, rank calculations, latency colors, the per-trace tables and
-charts, and mobile layouts.
+charts with their zoom and move controls (wheel, drag, touch, keys and buttons),
+and mobile layouts.

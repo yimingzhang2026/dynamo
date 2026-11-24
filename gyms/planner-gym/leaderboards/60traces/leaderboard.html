@@ -15,8 +15,10 @@
 @media(max-width:950px){.latency-slo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:640px){.latency-slo-grid{grid-template-columns:1fr;padding:0 18px 15px}.latency-rules{grid-template-columns:1fr;padding:0 18px 15px}}
 .latency-intro{max-width:930px;margin-bottom:23px;color:var(--muted);font-size:13px}.latency-intro p{margin-bottom:8px}.latency-legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:13px}.latency-scroll{max-height:690px;overflow:auto;isolation:isolate}.latency-table{width:max-content;min-width:100%;border-collapse:separate;border-spacing:0}.latency-table th,.latency-table td{padding:12px 14px;border-right:1px solid #e8edee;vertical-align:top}.latency-table thead th{position:sticky;top:0;z-index:2;background:#f7f9f8;width:260px;min-width:260px;white-space:normal}.latency-table thead th:first-child,.latency-table tbody th{position:sticky;left:0;width:145px;min-width:145px;max-width:145px;background:#fff;box-shadow:2px 0 4px #172c3b12}.latency-table thead th:first-child{z-index:3;background:#f7f9f8}.latency-table tbody th{z-index:1;border-top:1px solid #e8edee;font-size:13px;color:var(--ink);vertical-align:middle}.latency-table td{font-size:12px;height:99px;background:#fff}.latency-table td.latency-over{background:#fffaf0}.latency-table td.latency-severe{background:#fff0f0}.latency-table td.latency-missing{background:#f6f7f8}.latency-table .dataset{font-weight:400;letter-spacing:0}.latency-objectives{font-weight:400;font-size:10px;color:var(--muted);margin-top:6px;letter-spacing:0}.latency-line{display:flex;align-items:baseline;gap:7px;white-space:nowrap;line-height:1.95}.latency-label{width:33px;flex-shrink:0;font-size:10px;color:var(--muted)}.latency-value{font-weight:600;flex:1;text-align:right}.latency-good{font-size:15px;font-weight:750}.latency-ratio{display:inline-block;min-width:57px;text-align:right;font-size:10px;line-height:1.65;font-weight:650;border-radius:4px;padding:1px 5px;background:#e8f4ec;color:#0b6348}.latency-ratio.over{background:#ffeac7;color:#8a470d}.latency-ratio.severe{background:#fbdada;color:#a32222}.latency-legend .latency-ratio{min-width:0}.latency-missing .latency-value{font-weight:400;color:var(--muted)}
-.trace-controls{padding:18px 25px}.trace-picker{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px}.trace-picker label{font-size:12px;color:var(--muted);margin-right:4px}.trace-picker select{padding:9px 12px;border:1px solid #cdd9dc;border-radius:7px;background:#fff;min-width:290px;max-width:100%}.trace-picker button{border:1px solid #cdd9dc;background:#fff;border-radius:7px;padding:8px 13px}.trace-picker button:disabled,.trace-legend button:disabled{opacity:.45;cursor:default}.trace-controls .case-specs{margin-bottom:0}.trace-controls .experiment-case{margin-top:0;max-width:none}.trace-controls .case-specs .wide{flex-basis:100%}.trace-table td,.trace-table th{text-align:right;padding-left:6px;padding-right:6px}.trace-table th{vertical-align:bottom;white-space:normal}.trace-table td:first-child,.trace-table th:first-child{padding-left:20px}.trace-table td:last-child,.trace-table th:last-child{padding-right:20px}.trace-table th span{display:block;font-weight:400;font-size:10px}.trace-table td:nth-child(-n+2),.trace-table th:nth-child(-n+2){text-align:left}.trace-table td.latency-good{font-size:12px;font-weight:700}.trace-table .latency-health{margin-left:0}.trace-table .latency-ratio{min-width:0;margin-left:5px;padding:1px 4px}.trace-name{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}.trace-line{display:inline-block;flex-shrink:0;width:18px;height:0;border-top:3px solid var(--c)}.trace-line.dashed{border-top-style:dashed}.trace-legend{gap:8px 18px}.trace-legend label{color:var(--ink);font-size:13px}.trace-legend .spacer{flex:1}.trace-legend button{border:1px solid #cdd9dc;background:#fff;border-radius:7px;padding:6px 12px;font-size:12px}.trace-note{margin:0 25px 14px;padding:11px 14px;border-radius:7px;background:var(--warn-bg);color:#795123;font-size:12px}.trace-charts{position:relative;padding:0 25px 12px}.trace-panel{margin-bottom:8px}.trace-panel-title{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--muted);padding-left:62px}.trace-panel-title b{color:var(--ink);font-weight:650}.trace-reference{display:inline-block;vertical-align:middle;width:18px;border-top:1px dashed #a32222;margin-left:4px}.trace-panel canvas{display:block;width:100%;height:124px;touch-action:pan-y;cursor:crosshair}.trace-panel.last canvas{height:142px}.trace-tip{position:absolute;z-index:4;pointer-events:none;min-width:200px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:#fff;box-shadow:0 8px 28px #183c462b;font-size:12px;line-height:1.55}.trace-tip div{display:flex;justify-content:space-between;gap:16px;white-space:nowrap}.trace-tip b{font-variant-numeric:tabular-nums}
-@media(max-width:640px){.trace-controls{padding:16px 18px}.trace-picker select{min-width:0;flex:1}.trace-note{margin:0 18px 12px}.trace-charts{padding:0 8px 10px}.trace-legend .spacer{display:none}}
+.trace-controls{padding:18px 25px}.trace-picker{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px}.trace-picker label{font-size:12px;color:var(--muted);margin-right:4px}.trace-picker select{padding:9px 12px;border:1px solid #cdd9dc;border-radius:7px;background:#fff;min-width:290px;max-width:100%}.trace-picker button{border:1px solid #cdd9dc;background:#fff;border-radius:7px;padding:8px 13px}.trace-picker button:disabled,.trace-steps button:disabled{opacity:.45;cursor:default}.trace-controls .case-specs{margin-bottom:0}.trace-controls .experiment-case{margin-top:0;max-width:none}.trace-controls .case-specs .wide{flex-basis:100%}.trace-table td,.trace-table th{text-align:right;padding-left:6px;padding-right:6px}.trace-table th{vertical-align:bottom;white-space:normal}.trace-table td:first-child,.trace-table th:first-child{padding-left:20px}.trace-table td:last-child,.trace-table th:last-child{padding-right:20px}.trace-table th span{display:block;font-weight:400;font-size:10px}.trace-table td:nth-child(-n+2),.trace-table th:nth-child(-n+2){text-align:left}.trace-table td.latency-good{font-size:12px;font-weight:700}.trace-table .latency-health{margin-left:0}.trace-table .latency-ratio{min-width:0;margin-left:5px;padding:1px 4px}.trace-name{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}.trace-line{display:inline-block;flex-shrink:0;width:18px;height:0;border-top:3px solid var(--c)}.trace-line.dashed{border-top-style:dashed}#trace-behavior{overflow:visible}.trace-bar{position:sticky;top:0;z-index:3;background:var(--paper);border-top:1px solid #e8edee;border-bottom:1px solid var(--line);padding:11px 0 8px}.trace-bar .tools{padding-bottom:9px}.trace-legend{gap:8px 18px}.trace-legend label{color:var(--ink);font-size:13px}.trace-zoom{gap:8px 14px}.trace-zoom .spacer{flex:1}.trace-zoom .segmented{padding:3px}.trace-zoom .segmented button{padding:5px 11px;font-size:12px}.trace-steps{display:flex;flex-wrap:wrap;gap:4px}.trace-steps button{border:1px solid #cdd9dc;background:#fff;border-radius:7px;padding:5px 10px;font-size:12px;min-width:31px}.trace-range{flex:0 0 262px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}.trace-nav{padding:0 25px}.trace-nav canvas{display:block;width:100%;height:44px;touch-action:none;cursor:crosshair}.trace-bar+.trace-note{margin-top:12px;margin-bottom:0}.trace-note{margin:0 25px 14px;padding:11px 14px;border-radius:7px;background:var(--warn-bg);color:#795123;font-size:12px}.trace-charts{position:relative;padding:12px 25px 12px}.trace-charts:focus-visible{outline:3px solid #4094d2;outline-offset:-3px}.trace-charts.pan canvas{cursor:grab}.trace-charts.moving canvas{cursor:grabbing}.trace-panel{margin-bottom:8px}.trace-panel-title{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--muted);padding-left:62px}.trace-panel-title b{color:var(--ink);font-weight:650}.trace-reference{display:inline-block;vertical-align:middle;width:18px;border-top:1px dashed #a32222;margin-left:4px}.trace-panel canvas{display:block;width:100%;height:124px;touch-action:pan-y;cursor:crosshair}.trace-panel.last canvas{height:142px}.trace-tip{position:absolute;z-index:4;pointer-events:none;min-width:200px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:#fff;box-shadow:0 8px 28px #183c462b;font-size:12px;line-height:1.55}.trace-tip div{display:flex;justify-content:space-between;gap:16px;white-space:nowrap}.trace-tip b{font-variant-numeric:tabular-nums}
+@media(max-width:640px){.trace-controls{padding:16px 18px}.trace-picker select{min-width:0;flex:1}.trace-note{margin:0 18px 12px}.trace-charts{padding:10px 8px 10px}.trace-nav{padding:0 8px}.trace-zoom .spacer{display:none}.trace-range{flex-basis:100%}}
+@media(max-width:950px),(max-height:720px){.trace-bar{position:static}}
+@media print{.trace-nav{display:none}}
 @media(max-width:950px){.wrap{padding:0 22px}.arch{display:none}.track{width:70px}.split{grid-template-columns:1fr}.stats{gap:10px}.stat{padding:16px}.stat-value{font-size:25px}}
 @media(max-width:640px){.wrap{padding:0 16px}.topbar .wrap{align-items:flex-start;flex-direction:column;gap:10px;padding-top:16px;padding-bottom:12px}.brand span{font-size:14px}.nav a{padding:6px 10px}.hero{padding-top:30px}.hero p{font-size:14px}.stats{grid-template-columns:1fr 1fr}.filterbar{align-items:flex-start;flex-direction:column;gap:10px}.panel-head{padding:20px 18px 14px}.right-note{display:none}.ranking{min-width:560px}.compact{min-width:480px}td,th{padding-left:15px;padding-right:15px}.footnote{padding:13px 18px}.overview-grid{grid-template-columns:1fr}.overview-card .ranking{min-width:0}.tools{padding:0 18px 15px}.search{min-width:0;width:100%}.failure-list,.info-body{padding-left:18px;padding-right:18px}.failure{flex-direction:column}.failure-diagnostic{text-align:left}.footer{align-items:flex-start;flex-direction:column}.track{display:none}.dialog-head,.dialog-body{padding:18px}.overview-card{padding:23px}}
 @media print{body{background:#fff;font-size:11px}.wrap{max-width:none;padding:0}.topbar,.filterbar,.tools,.downloads,.primary-link,.arch{display:none}.hero{padding-top:12px}.panel,.stat,.overview-card{box-shadow:none;break-inside:avoid}.table-scroll{overflow:visible}.matrix td{white-space:normal;font-size:10px}.panel-head{padding:12px}.stats{gap:8px}.split{display:block}.footnote{padding:9px}.reference{background:#fff}.footer{padding-bottom:0}dialog{display:none}}
@@ -300,7 +302,8 @@ function latencyPage(){
 
 const allCases = Object.values(report.pages).flatMap(p=>p.cases);
 const traceStyle = {mpc:{color:'#0072B2'},planner:{color:'#009E73'},keda:{color:'#E69F00'},reactive:{color:'#CC79A7'},static:{color:'#5f6b73',dash:[6,4]},knowline31b:{color:'#D55E00'}};
-const traceState = {caseId:null,hidden:new Set(),log:false,view:null,hover:null,drag:null,panels:[],data:null};
+const traceState = {caseId:null,hidden:new Set(),log:false,fit:true,mode:'zoom',view:null,hover:null,drag:null,nav:null,frame:0,panels:[],data:null};
+const traceTickSteps = [1,2,5,10,15,30,60,120,300,600,900,1800,3600,7200,10800,21600,43200,86400,172800];
 const traceMargin = {left:62,right:12,top:8};
 const traceSwatch = p=>`<i class="trace-line${traceStyle[p].dash?' dashed':''}" style="--c:${traceStyle[p].color}"></i>`;
 const traceTimeline = (c,p)=>traces.timelines[c.case_id+'-'+p];
@@ -354,21 +357,47 @@ function traceSteps(span,choices){
  const power=10**Math.floor(Math.log10(span)),step=choices.map(m=>m*power).find(s=>span/s<=6)??10*power;
  return step;
 }
-function traceAxis(c){
- const [x0,x1]=traceState.view||[0,c.duration_s],span=x1-x0;
- const [unit,size,steps]=span<=3*3600?['min',60,[.5,1,2,5,10,15,20,30]]:span<=3*86400?['h',3600,[.5,1,2,3,4,6,12]]:['d',86400,[.5,1,2]];
- const step=(steps.find(s=>span/size/s<=9)??steps.at(-1))*size,ticks=[];
- for(let t=Math.ceil(x0/step)*step;t<=x1+step*1e-9;t+=step)ticks.push(t);
- return {x0,x1,ticks,label:t=>number(t/size,Number.isInteger(t/size)?0:Number.isInteger(t/size*10)?1:2)+' '+unit};
+// The period shown; `view` is null for the whole trace. A zoom stops at four points of the saved series.
+function traceWindow(){return traceState.view||[0,traceCase().duration_s];}
+function traceSetView(from,to){
+ const full=traceCase().duration_s,span=Math.min(full,Math.max(traceState.data.width*4,to-from));
+ const start=Math.min(full-span,Math.max(0,from+(to-from-span)/2));
+ traceState.view=span>=full*(1-1e-9)?null:[start,start+span];
+ traceControls();traceRedraw();
 }
-function traceClock(seconds){
+function traceZoom(factor,anchor){
+ const [x0,x1]=traceWindow(),span=Math.min(traceCase().duration_s,Math.max(traceState.data.width*4,(x1-x0)*factor));
+ const at=anchor??(x0+x1)/2,start=at-(at-x0)*span/(x1-x0);
+ traceSetView(start,start+span);
+}
+function tracePan(seconds){const [x0,x1]=traceWindow();traceSetView(x0+seconds,x1+seconds);}
+function traceTicks(c,x0,x1,room){
+ const step=traceTickSteps.find(s=>(x1-x0)/s<=room)??traceTickSteps.at(-1),ticks=[];
+ for(let t=Math.ceil(x0/step-1e-9)*step;t<=x1+step*1e-9;t+=step)ticks.push(t);
+ const label=step%86400===0?t=>t/86400+' d':step%3600===0&&c.duration_s<=2*86400?t=>t/3600+' h':step%60===0&&c.duration_s<=3*3600?t=>t/60+' min':t=>traceClock(t,step%60!==0);
+ return {ticks,label};
+}
+function traceClock(seconds,withSeconds=true){
  const s=Math.round(seconds),days=Math.floor(s/86400),two=v=>String(v).padStart(2,'0');
- return (days?days+'d ':'')+two(Math.floor(s%86400/3600))+':'+two(Math.floor(s%3600/60))+':'+two(s%60);
+ return (days?days+'d ':'')+two(Math.floor(s%86400/3600))+':'+two(Math.floor(s%3600/60))+(withSeconds?':'+two(s%60):'');
 }
+function traceLength(seconds){
+ const s=Math.round(seconds),parts=[[86400,'d'],[3600,'h'],[60,'min'],[1,'s']].map(([size,unit],i,all)=>[Math.floor((i?s%all[i-1][0]:s)/size),unit]).filter(([n])=>n);
+ return parts.slice(0,2).map(([n,unit])=>n+' '+unit).join(' ')||'0 s';
+}
+function traceControls(){
+ const c=traceCase(),view=traceState.view,[x0,x1]=traceWindow(),charts=document.getElementById('trace-charts');
+ const set=(id,off)=>{const button=document.getElementById(id);if(off&&document.activeElement===button)charts.focus({preventScroll:true});button.disabled=off;};
+ set('trace-reset',!view);set('trace-out',!view);set('trace-in',x1-x0<=traceState.data.width*4*(1+1e-9));set('trace-left',x0<=0);set('trace-right',x1>=c.duration_s);
+ document.getElementById('trace-range').textContent=view?`${traceClock(x0)} – ${traceClock(x1)} (${traceLength(x1-x0)})`:`Whole trace (${traceLength(c.duration_s)})`;
+}
+function traceRedraw(){if(!traceState.frame)traceState.frame=requestAnimationFrame(()=>{traceState.frame=0;drawTrace();});}
 const traceValue = v=>v==null?'—':v>=1e6?number(v/1e6,2)+'M':v>=1e4?number(v/1e3,1)+'k':number(v,v>=100?0:v>=10?1:2);
 const traceTick = v=>v>=1e6?v/1e6+'M':v>=1e4?v/1e3+'k':v.toLocaleString('en-US',{maximumFractionDigits:6});
 function traceScale(panel){
- const values=panel.lines.flatMap(l=>l.values).filter(v=>v!=null),most=Math.max(0,...values);
+ // Fitted to the period shown, with one point beyond each end so the lines enter and leave inside the range.
+ const data=traceState.data,[x0,x1]=traceWindow(),fit=traceState.fit&&traceState.view;
+ const values=panel.lines.flatMap(l=>fit?l.values.slice(Math.max(0,Math.floor(x0/data.width)-1),Math.floor(x1/data.width)+2):l.values).filter(v=>v!=null),most=Math.max(0,...values);
  const top=Math.max(most,panel.reference&&panel.reference<=Math.max(most,1e-9)*4?panel.reference:0)||1;
  if(traceState.log&&panel.log){
   const positive=values.filter(v=>v>0),high=Math.ceil(Math.log10(Math.max(top,1e-9))-1e-9),low=Math.max(high-6,Math.floor(Math.log10(positive.length?Math.min(...positive):top/10)+1e-9));
@@ -380,15 +409,20 @@ function traceScale(panel){
  for(let v=0;v<=limit+step*1e-9;v+=step)ticks.push(v);
  return {ticks,position:v=>v/limit};
 }
-function drawTracePanel(panel,c){
- const canvas=panel.canvas,ratio=window.devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;
- if(!w)return;
- canvas.width=Math.round(w*ratio);canvas.height=Math.round(h*ratio);
- const g=canvas.getContext('2d'),data=traceState.data,axis=traceAxis(c),scale=traceScale(panel);
- const left=traceMargin.left,right=w-traceMargin.right,top=traceMargin.top,bottom=h-(panel.last?26:8);
- const X=t=>left+(t-axis.x0)/(axis.x1-axis.x0)*(right-left),Y=v=>bottom-scale.position(v)*(bottom-top);
+function traceCanvas(canvas){
+ const ratio=window.devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight,W=Math.round(w*ratio),H=Math.round(h*ratio);
+ if(canvas.width!==W||canvas.height!==H){canvas.width=W;canvas.height=H;}
+ const g=canvas.getContext('2d');
  g.setTransform(ratio,0,0,ratio,0,0);g.clearRect(0,0,w,h);
  g.font='11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';g.lineWidth=1;g.textBaseline='middle';
+ return {g,w,h};
+}
+function drawTracePanel(panel,c){
+ if(!panel.canvas.clientWidth)return;
+ const {g,w,h}=traceCanvas(panel.canvas),data=traceState.data,[x0,x1]=traceWindow(),scale=traceScale(panel);
+ const left=traceMargin.left,right=w-traceMargin.right,top=traceMargin.top,bottom=h-(panel.last?26:8);
+ const axis=traceTicks(c,x0,x1,Math.max(3,Math.min(9,Math.floor((right-left)/84))));
+ const X=t=>left+(t-x0)/(x1-x0)*(right-left),Y=v=>bottom-scale.position(v)*(bottom-top);
  for(const tick of scale.ticks){
   const y=Math.round(Y(tick))+.5;
   g.strokeStyle=tick===scale.ticks[0]?'#b9c7cc':'#e8edee';g.beginPath();g.moveTo(left,y);g.lineTo(right,y);g.stroke();
@@ -398,29 +432,32 @@ function drawTracePanel(panel,c){
  for(const tick of axis.ticks){
   const x=Math.round(X(tick))+.5;
   g.strokeStyle='#eef2f3';g.beginPath();g.moveTo(x,top);g.lineTo(x,bottom);g.stroke();
-  if(panel.last){g.fillStyle='#536775';g.fillText(axis.label(tick),x,bottom+7);}
+  if(panel.last){const text=axis.label(tick);g.fillStyle='#536775';g.fillText(text,Math.min(x,w-g.measureText(text).width/2-1),bottom+7);}
  }
  g.save();g.beginPath();g.rect(left,top-1,right-left,bottom-top+2);g.clip();
  if(panel.reference!=null&&scale.position(panel.reference)<=1){
   const y=Math.round(Y(panel.reference))+.5;
   g.strokeStyle='#a32222';g.setLineDash([3,4]);g.beginPath();g.moveTo(left,y);g.lineTo(right,y);g.stroke();g.setLineDash([]);
  }
+ // Each saved point is marked once the points are far enough apart to tell them from the line.
+ const first=Math.max(0,Math.floor(x0/data.width)-1),last=Math.min(data.count-1,Math.floor(x1/data.width)+1),marked=(right-left)*data.width/(x1-x0)>=9;
  for(const line of panel.lines){
   const style=line.planner?traceStyle[line.planner]:{color:'#172c3b'};
-  g.strokeStyle=style.color;g.lineWidth=1.7;g.lineJoin='round';g.setLineDash(style.dash||[]);g.beginPath();
+  g.strokeStyle=g.fillStyle=style.color;g.lineWidth=1.7;g.lineJoin='round';g.setLineDash(style.dash||[]);g.beginPath();
   let open=false;
-  for(let i=0;i<data.count;i++){
+  for(let i=first;i<=last;i++){
    const v=line.values[i];
-   if(v==null||data.x[i]<axis.x0-data.width||data.x[i]>axis.x1+data.width){open=false;continue;}
+   if(v==null){open=false;continue;}
    if(open)g.lineTo(X(data.x[i]),Y(v));else g.moveTo(X(data.x[i]),Y(v));
    open=true;
   }
   g.stroke();g.setLineDash([]);
+  if(marked)for(let i=first;i<=last;i++)if(line.values[i]!=null){g.beginPath();g.arc(X(data.x[i]),Y(line.values[i]),2.2,0,2*Math.PI);g.fill();}
  }
- if(traceState.drag){
+ if(traceState.drag?.kind==='select'){
   const a=X(traceState.drag.start),b=X(traceState.drag.end);
   g.fillStyle='#096b6322';g.fillRect(Math.min(a,b),top,Math.abs(b-a),bottom-top);
- }else if(traceState.hover!=null){
+ }else if(traceState.hover!=null&&!traceState.drag){
   const i=traceBucket(traceState.hover),x=Math.round(X(data.x[i]))+.5;
   g.strokeStyle='#172c3b66';g.lineWidth=1;g.beginPath();g.moveTo(x,top);g.lineTo(x,bottom);g.stroke();
   for(const line of panel.lines){
@@ -430,8 +467,27 @@ function drawTracePanel(panel,c){
  }
  g.restore();
 }
+// The whole trace as its arriving requests, with the period shown as a window that can be dragged.
+function drawTraceNav(c){
+ const canvas=document.getElementById('trace-nav');
+ if(!canvas.clientWidth)return;
+ const {g,w,h}=traceCanvas(canvas),data=traceState.data,left=traceMargin.left,right=w-traceMargin.right,top=2,bottom=h-2,most=Math.max(1e-9,...data.arrivals);
+ const X=t=>left+t/c.duration_s*(right-left),[x0,x1]=traceWindow(),a=X(x0),b=Math.max(X(x1),a+3);
+ g.fillStyle='#536775';g.textAlign='right';g.fillText('Whole',left-7,h/2-6);g.fillText('trace',left-7,h/2+7);
+ g.fillStyle='#f1f5f5';g.fillRect(left,top,right-left,bottom-top);
+ g.beginPath();g.moveTo(left,bottom);
+ for(let i=0;i<data.count;i++)g.lineTo(X(data.x[i]),bottom-data.arrivals[i]/most*(bottom-top-3));
+ g.lineTo(right,bottom);g.closePath();g.fillStyle='#8fa3ad';g.fill();
+ if(traceState.view){g.fillStyle='#ffffff9e';g.fillRect(left,top,a-left,bottom-top);g.fillRect(b,top,right-b,bottom-top);}
+ if(traceState.nav?.kind==='select'){
+  const p=X(traceState.nav.at),q=X(traceState.nav.end);
+  g.fillStyle='#096b6322';g.fillRect(Math.min(p,q),top,Math.abs(q-p),bottom-top);
+ }
+ g.strokeStyle=g.fillStyle='#096b63';g.lineWidth=1.5;g.strokeRect(a+.75,top+.75,b-a-1.5,bottom-top-1.5);
+ for(const x of [a,b])g.fillRect(x-2,h/2-8,4,16);
+}
 const traceBucket = t=>Math.min(traceState.data.count-1,Math.max(0,Math.floor(t/traceState.data.width)));
-function drawTrace(){const c=traceCase();for(const panel of traceState.panels)drawTracePanel(panel,c);}
+function drawTrace(){const c=traceCase();for(const panel of traceState.panels)drawTracePanel(panel,c);drawTraceNav(c);}
 function traceCase(){return allCases.find(c=>c.case_id===traceState.caseId);}
 function traceTip(panel,event){
  const tip=document.getElementById('trace-tip'),c=traceCase(),data=traceState.data;
@@ -444,26 +500,26 @@ function traceTip(panel,event){
  tip.style.top=Math.max(0,y-tip.offsetHeight/2)+'px';
 }
 function traceTimeAt(canvas,event){
- const box=canvas.getBoundingClientRect(),axis=traceAxis(traceCase());
+ const box=canvas.getBoundingClientRect(),[x0,x1]=traceWindow();
  const share=(event.clientX-box.left-traceMargin.left)/(box.width-traceMargin.left-traceMargin.right);
- return axis.x0+Math.min(1,Math.max(0,share))*(axis.x1-axis.x0);
+ return x0+Math.min(1,Math.max(0,share))*(x1-x0);
 }
 function traceBehavior(c){
  const data=traceState.data=traceData(c),panels=traceState.panels=tracePanels(c,data);
  const measured=plannerIds.filter(p=>data.lines[p]?.measured),absent=plannerIds.filter(p=>c.rows[p].status==='completed'&&!data.lines[p]?.measured);
  const fixed=data.lines.static&&!data.lines.static.measured;
- document.getElementById('trace-legend').innerHTML=plannerIds.map(p=>`<label><input type="checkbox" data-trace-planner="${p}"${traceState.hidden.has(p)?'':' checked'}${data.lines[p]?'':' disabled'}>${traceSwatch(p)}${esc(report.planners[p])}${data.lines[p]?.measured?'':`<span class="badge">${data.lines[p]?'fixed fleet':'no time series'}</span>`}</label>`).join('')+`<span class="spacer"></span><label><input type="checkbox" id="trace-log"${traceState.log?' checked':''}> Log scale for queue and latency</label><button type="button" id="trace-reset"${traceState.view?'':' disabled'}>Reset zoom</button>`;
+ document.getElementById('trace-legend').innerHTML=plannerIds.map(p=>`<label><input type="checkbox" data-trace-planner="${p}"${traceState.hidden.has(p)?'':' checked'}${data.lines[p]?'':' disabled'}>${traceSwatch(p)}${esc(report.planners[p])}${data.lines[p]?.measured?'':`<span class="badge">${data.lines[p]?'fixed fleet':'no time series'}</span>`}</label>`).join('');
  const note=document.getElementById('trace-note');
  note.hidden=!absent.length;
  note.textContent=absent.length?`${measured.length?'Only '+measured.map(p=>report.planners[p]).join(', ')+' ha'+(measured.length===1?'s':'ve')+' a saved time series on this trace. ':'No per-planner time series is saved for this trace yet. '}Missing: ${absent.map(p=>report.planners[p]).join(', ')}.${fixed?' Static holds its fleet, so its workers and GPUs are drawn as constants; its queue and latency over time are not.':''} Arriving requests come from the trace and are the same for every planner.`:'';
  document.getElementById('trace-bucket').innerHTML=`${number(data.width,0)} s per point<br>${data.count} points`;
  document.getElementById('trace-charts').innerHTML=panels.map((panel,i)=>`<div class="trace-panel${i===panels.length-1?' last':''}" data-trace-panel="${panel.key}"><div class="trace-panel-title"><b>${esc(panel.title)} <span class="muted" style="font-weight:400">(${esc(panel.unit)})</span></b>${panel.reference!=null?`<span>${panel.referenceLabel} ${number(panel.reference,0)} ${esc(panel.unit)} <i class="trace-reference"></i></span>`:''}</div><canvas role="img" aria-label="${esc(panel.title)} over time on ${c.case_id}: ${esc(panel.lines.map(l=>l.planner?report.planners[l.planner]:'all planners').join(', '))}"></canvas></div>`).join('')+'<div class="trace-tip" id="trace-tip" hidden></div>';
  panels.forEach((panel,i)=>{panel.last=i===panels.length-1;panel.canvas=document.querySelector(`[data-trace-panel="${panel.key}"] canvas`);});
- drawTrace();
+ traceControls();drawTrace();
 }
 function showTrace(id,replace=false){
  const c=allCases.find(c=>c.case_id===id)||allCases[0];
- traceState.caseId=c.case_id;traceState.view=traceState.hover=traceState.drag=null;
+ traceState.caseId=c.case_id;traceState.view=traceState.hover=traceState.drag=traceState.nav=null;
  if(location.hash.slice(1)!==c.case_id)history[replace?'replaceState':'pushState'](null,'','#'+c.case_id);
  document.title=`Planner · ${c.case_id} · ${c.dataset}`;
  document.getElementById('trace-select').value=c.case_id;
@@ -475,34 +531,114 @@ function showTrace(id,replace=false){
 }
 function tracePage(){
  const groups=[['agg','HT'],['agg','LC'],['disagg','HT'],['disagg','LC']];
- app.innerHTML=`<div class="hero"><div><div class="eyebrow">60 traces / 6 planners / one trace at a time</div><h1>Traces</h1><p>Pick a trace to see every planner’s result on it and how each planner behaved while the trace replayed.</p></div><span class="tag">RANKED BY GOODPUT PER GPU</span></div><section class="panel trace-controls"><div class="trace-picker"><label for="trace-select">Trace</label><button type="button" id="trace-prev" aria-label="Previous trace">←</button><select id="trace-select">${groups.map(([topology,regime])=>`<optgroup label="${esc(report.pages[topology].title)} · ${regime==='HT'?'HT · throughput':'LC · latency'}">${report.pages[topology].cases.filter(c=>c.regime===regime).map(c=>`<option value="${c.case_id}">${c.case_id} · ${esc(c.dataset)} · ${esc(c.size)}</option>`).join('')}</optgroup>`).join('')}</select><button type="button" id="trace-next" aria-label="Next trace">→</button></div><div class="case-specs" id="trace-specs"></div></section><div id="trace-table"></div><section class="panel" id="trace-behavior" aria-labelledby="trace-behavior-title"><div class="panel-head"><div><h2 id="trace-behavior-title">Behavior over time</h2><p>One line per planner, on the time of the trace. Drag across a chart to zoom in on a period; double-click to reset. Value ranges stay fixed while zooming.</p></div><span class="right-note" id="trace-bucket"></span></div><div class="tools trace-legend" id="trace-legend"></div><p class="trace-note" id="trace-note" role="status" hidden></p><div class="trace-charts" id="trace-charts"></div><div class="footnote">Each point is the mean over its time bucket: queue, cache use, workers and GPUs are averaged over time; TTFT and ITL are averaged over the requests that produced them. Ready workers serve requests; provisioned GPUs also count starting and draining workers, which is what GPU hours charge.</div></section>${methods()}${footer()}`;
+ app.innerHTML=`<div class="hero"><div><div class="eyebrow">60 traces / 6 planners / one trace at a time</div><h1>Traces</h1><p>Pick a trace to see every planner’s result on it and how each planner behaved while the trace replayed.</p></div><span class="tag">RANKED BY GOODPUT PER GPU</span></div><section class="panel trace-controls"><div class="trace-picker"><label for="trace-select">Trace</label><button type="button" id="trace-prev" aria-label="Previous trace">←</button><select id="trace-select">${groups.map(([topology,regime])=>`<optgroup label="${esc(report.pages[topology].title)} · ${regime==='HT'?'HT · throughput':'LC · latency'}">${report.pages[topology].cases.filter(c=>c.regime===regime).map(c=>`<option value="${c.case_id}">${c.case_id} · ${esc(c.dataset)} · ${esc(c.size)}</option>`).join('')}</optgroup>`).join('')}</select><button type="button" id="trace-next" aria-label="Next trace">→</button></div><div class="case-specs" id="trace-specs"></div></section><div id="trace-table"></div><section class="panel" id="trace-behavior" aria-labelledby="trace-behavior-title"><div class="panel-head"><div><h2 id="trace-behavior-title">Behavior over time</h2><p>One line per planner, on the time of the trace. Scroll over a chart to zoom in and out around the pointer. Drag across a chart to pick a period, or to move along the trace; holding Shift swaps the two. The strip above the charts is the whole trace: drag its window or its edges. Double-click for the whole trace.</p></div><span class="right-note" id="trace-bucket"></span></div><div class="trace-bar"><div class="tools trace-legend" id="trace-legend"></div><div class="tools trace-zoom"><div class="segmented" role="group" aria-label="What dragging across a chart does"><button type="button" data-trace-mode="zoom" aria-pressed="true">Drag to zoom</button><button type="button" data-trace-mode="pan" aria-pressed="false">Drag to move</button></div><div class="trace-steps" role="group" aria-label="Period shown"><button type="button" id="trace-left" title="Move to the earlier half (← key)">‹ Earlier</button><button type="button" id="trace-out" aria-label="Zoom out" title="Zoom out (− key)">−</button><button type="button" id="trace-in" aria-label="Zoom in" title="Zoom in (+ key)">+</button><button type="button" id="trace-right" title="Move to the later half (→ key)">Later ›</button><button type="button" id="trace-reset" title="Show the whole trace (0 key)">Whole trace</button></div><span class="trace-range" id="trace-range"></span><span class="spacer"></span><label title="Each value axis covers the period shown instead of the whole trace"><input type="checkbox" id="trace-fit" checked> Fit values to period</label><label title="Logarithmic value axis for queue, TTFT and ITL"><input type="checkbox" id="trace-log"> Log scale</label></div><div class="trace-nav"><canvas id="trace-nav" aria-hidden="true"></canvas></div></div><p class="trace-note" id="trace-note" role="status" hidden></p><div class="trace-charts" id="trace-charts" tabindex="0" role="group" aria-label="Charts of behavior over time. Arrow keys move the period shown, plus and minus zoom, 0 shows the whole trace."></div><div class="footnote">Each point is the mean over its time bucket: queue, cache use, workers and GPUs are averaged over time; TTFT and ITL are averaged over the requests that produced them. Ready workers serve requests; provisioned GPUs also count starting and draining workers, which is what GPU hours charge. Zooming shows the same points and marks each one once they are far enough apart; a change shorter than a bucket is not visible.</div></section>${methods()}${footer()}`;
  const move=step=>showTrace(allCases[allCases.indexOf(traceCase())+step].case_id);
  document.getElementById('trace-select').onchange=e=>showTrace(e.target.value);
  document.getElementById('trace-prev').onclick=()=>move(-1);document.getElementById('trace-next').onclick=()=>move(1);
- const section=document.getElementById('trace-behavior'),charts=document.getElementById('trace-charts');
+ const section=document.getElementById('trace-behavior'),charts=document.getElementById('trace-charts'),nav=document.getElementById('trace-nav');
  section.addEventListener('change',e=>{
+  if(e.target.id==='trace-fit'){traceState.fit=e.target.checked;drawTrace();return;}
   if(e.target.id==='trace-log')traceState.log=e.target.checked;
   else if(e.target.dataset.tracePlanner)traceState.hidden[e.target.checked?'delete':'add'](e.target.dataset.tracePlanner);
   else return;
   traceBehavior(traceCase());
  });
- section.addEventListener('click',e=>{if(e.target.id==='trace-reset'){traceState.view=null;traceBehavior(traceCase());}});
- const panelOf=canvas=>traceState.panels.find(panel=>panel.canvas===canvas);
- charts.addEventListener('pointerdown',e=>{if(e.target.tagName!=='CANVAS'||e.button)return;const t=traceTimeAt(e.target,e);traceState.drag={start:t,end:t,canvas:e.target};e.target.setPointerCapture(e.pointerId);traceTip(null);});
- charts.addEventListener('pointermove',e=>{
-  if(traceState.drag){traceState.drag.end=traceTimeAt(traceState.drag.canvas,e);drawTrace();return;}
-  if(e.target.tagName!=='CANVAS')return;
-  traceState.hover=traceTimeAt(e.target,e);drawTrace();traceTip(panelOf(e.target),e);
+ const whole=()=>traceSetView(0,traceCase().duration_s),shown=()=>{const [x0,x1]=traceWindow();return x1-x0;};
+ const steps={'trace-reset':whole,'trace-in':()=>traceZoom(.5),'trace-out':()=>traceZoom(2),'trace-left':()=>tracePan(-shown()/2),'trace-right':()=>tracePan(shown()/2)};
+ section.addEventListener('click',e=>{
+  const mode=e.target.dataset.traceMode;
+  if(!mode){steps[e.target.id]?.();return;}
+  traceState.mode=mode;charts.classList.toggle('pan',mode==='pan');
+  section.querySelectorAll('[data-trace-mode]').forEach(button=>button.setAttribute('aria-pressed',button===e.target));
  });
- const release=()=>{
+ section.addEventListener('keydown',e=>{
+  if(e.ctrlKey||e.metaKey||e.altKey)return;
+  const share=e.shiftKey?.5:.1,act={ArrowLeft:()=>tracePan(-shown()*share),ArrowRight:()=>tracePan(shown()*share),'+':()=>traceZoom(.5),'=':()=>traceZoom(.5),'-':()=>traceZoom(2),'_':()=>traceZoom(2),'0':whole,Escape:whole}[e.key];
+  if(act){e.preventDefault();act();}
+ });
+ const panelOf=canvas=>traceState.panels.find(panel=>panel.canvas===canvas);
+ // The plotted part of a canvas, in page pixels: the charts and the strip share it.
+ const plot=canvas=>{const box=canvas.getBoundingClientRect();return {left:box.left+traceMargin.left,width:box.width-traceMargin.left-traceMargin.right};};
+ const hoverAt=e=>{traceState.hover=traceTimeAt(e.target,e);traceRedraw();traceTip(panelOf(e.target),e);};
+ const touches=new Map();
+ charts.addEventListener('pointerdown',e=>{
+  if(e.target.tagName!=='CANVAS'||e.button)return;
+  const area=plot(e.target),[x0,x1]=traceWindow(),time=x=>x0+(x-area.left)/area.width*(x1-x0),at=traceTimeAt(e.target,e);
+  if(e.pointerType==='touch')touches.set(e.pointerId,e.clientX);else charts.focus({preventScroll:true});
+  // Two fingers pinch. One pointer picks a period or moves along the trace; Shift swaps the two.
+  traceState.drag=touches.size===2?{kind:'pinch',ids:[...touches.keys()],times:[...touches.values()].map(time),area}:(traceState.mode==='pan')!==e.shiftKey?{kind:'pan',from:e.clientX,window:[x0,x1],area}:{kind:'select',start:at,end:at,canvas:e.target};
+  e.target.setPointerCapture(e.pointerId);charts.classList.toggle('moving',traceState.drag.kind==='pan');
+  traceState.hover=null;traceTip(null);traceRedraw();
+ });
+ charts.addEventListener('pointermove',e=>{
+  const drag=traceState.drag;
+  if(touches.has(e.pointerId))touches.set(e.pointerId,e.clientX);
+  if(!drag){if(e.target.tagName==='CANVAS')hoverAt(e);return;}
+  if(drag.kind==='select'){drag.end=traceTimeAt(drag.canvas,e);traceRedraw();return;}
+  if(drag.kind==='pan'){const shift=(drag.from-e.clientX)/drag.area.width*(drag.window[1]-drag.window[0]);traceSetView(drag.window[0]+shift,drag.window[1]+shift);return;}
+  // Each finger keeps the moment of the trace it first touched.
+  const [p,q]=drag.ids.map(id=>touches.get(id)),[s,t]=drag.times,span=(t-s)/(q-p)*drag.area.width,start=s-(p-drag.area.left)/drag.area.width*span;
+  if(Math.abs(q-p)>=24&&span>0)traceSetView(start,start+span);
+ });
+ const release=e=>{
+  touches.delete(e.pointerId);
   const drag=traceState.drag;if(!drag)return;
-  traceState.drag=null;
-  const axis=traceAxis(traceCase()),from=Math.min(drag.start,drag.end),to=Math.max(drag.start,drag.end);
-  if(to-from>(axis.x1-axis.x0)*.02&&to-from>=traceState.data.width*2){traceState.view=[from,to];traceBehavior(traceCase());}else drawTrace();
+  traceState.drag=null;charts.classList.remove('moving');
+  const [x0,x1]=traceWindow(),from=Math.min(drag.start,drag.end),to=Math.max(drag.start,drag.end);
+  if(drag.kind==='select'&&e.type==='pointerup'&&to-from>(x1-x0)*.01)traceSetView(from,to);else traceRedraw();
  };
  charts.addEventListener('pointerup',release);charts.addEventListener('pointercancel',release);
- charts.addEventListener('pointerleave',()=>{if(traceState.drag)return;traceState.hover=null;drawTrace();traceTip(null);});
- charts.addEventListener('dblclick',()=>{if(traceState.view){traceState.view=null;traceBehavior(traceCase());}});
+ charts.addEventListener('pointerleave',()=>{if(traceState.drag)return;traceState.hover=null;traceRedraw();traceTip(null);});
+ charts.addEventListener('dblclick',()=>{if(traceState.view)whole();});
+ // The wheel zooms around the pointer and, sideways or with Shift, moves along the trace. A turn that is
+ // already scrolling the page keeps scrolling it, and so does zooming out of the whole trace after a pause.
+ let pageScrolled=-1e9,wheelZoomed=-1e9;
+ window.addEventListener('scroll',()=>{pageScrolled=performance.now();},{passive:true});
+ charts.addEventListener('wheel',e=>{
+  if(e.target.tagName!=='CANVAS')return;
+  const unit=e.deltaMode===1?16:e.deltaMode===2?400:1,dx=e.deltaX*unit,dy=e.deltaY*unit,now=performance.now();
+  if(Math.abs(dx)>Math.abs(dy)||e.shiftKey){e.preventDefault();tracePan((dx||dy)/plot(e.target).width*shown());}
+  else{
+   if(!e.ctrlKey&&(now-pageScrolled<300||dy>0&&!traceState.view&&now-wheelZoomed>400))return;
+   e.preventDefault();wheelZoomed=now;
+   traceZoom(Math.exp(Math.max(-60,Math.min(60,dy))*(e.ctrlKey?.01:.0025)),traceTimeAt(e.target,e));
+  }
+  hoverAt(e);
+ },{passive:false});
+ // The strip: drag the window to move it, an edge to resize it, elsewhere to pick a new period; a click brings the window there.
+ const navTime=e=>{const area=plot(nav);return Math.min(1,Math.max(0,(e.clientX-area.left)/area.width))*traceCase().duration_s;};
+ const navPart=e=>{
+  if(!traceState.view)return 'select';
+  const area=plot(nav),x=e.clientX-area.left,[a,b]=traceState.view.map(t=>t/traceCase().duration_s*area.width),grip=Math.min(7,(b-a)/3);
+  return x>a+grip&&x<b-grip?'move':x>=a-7&&x<=a+grip?'start':x>=b-grip&&x<=b+7?'end':'select';
+ };
+ const navCursor={move:'grab',start:'ew-resize',end:'ew-resize',select:'crosshair'};
+ nav.addEventListener('pointerdown',e=>{
+  if(e.button)return;
+  const at=navTime(e);
+  traceState.nav={kind:navPart(e),at,end:at,window:traceWindow()};
+  nav.setPointerCapture(e.pointerId);if(traceState.nav.kind==='move')nav.style.cursor='grabbing';
+ });
+ nav.addEventListener('pointermove',e=>{
+  const drag=traceState.nav;
+  if(!drag){nav.style.cursor=navCursor[navPart(e)];return;}
+  const at=navTime(e),[x0,x1]=drag.window,least=traceState.data.width*4;
+  if(drag.kind==='move')traceSetView(x0+at-drag.at,x1+at-drag.at);
+  else if(drag.kind==='start')traceSetView(Math.min(at,x1-least),x1);
+  else if(drag.kind==='end')traceSetView(x0,Math.max(at,x0+least));
+  else{drag.end=at;traceRedraw();}
+ });
+ const navRelease=e=>{
+  const drag=traceState.nav;if(!drag)return;
+  traceState.nav=null;nav.style.cursor=navCursor[navPart(e)];
+  const from=Math.min(drag.at,drag.end),to=Math.max(drag.at,drag.end),half=(drag.window[1]-drag.window[0])/2;
+  if(drag.kind!=='select'||e.type!=='pointerup')traceRedraw();
+  else if(to-from>traceCase().duration_s*.01)traceSetView(from,to);
+  else if(traceState.view)traceSetView(drag.at-half,drag.at+half);
+  else traceRedraw();
+ };
+ nav.addEventListener('pointerup',navRelease);nav.addEventListener('pointercancel',navRelease);
+ nav.addEventListener('dblclick',()=>{if(traceState.view)whole();});
  window.addEventListener('resize',drawTrace);
  window.addEventListener('hashchange',()=>{if(location.hash.slice(1)!==traceState.caseId)showTrace(location.hash.slice(1),true);});
  showTrace(location.hash.slice(1),true);

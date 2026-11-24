@@ -288,6 +288,13 @@ def test_arrivals_must_be_the_benchmark_traces(tmp_path, report, change):
         make_trace_view(tmp_path / "inputs", report)
 
 
+def test_every_selected_replay_names_its_telemetry(report):
+    # Static included: its record keeps the fingerprint its replay recorded.
+    replays = [j for j in timeline_jobs(report) if j["planner"] != "knowline31b"]
+    assert len(replays) == 300
+    assert all(len(j["telemetry"]["sha256"]) == 64 for j in replays)
+
+
 def test_a_time_series_must_belong_to_the_selected_result(tmp_path, report):
     shutil.copytree(ROOT / "inputs", tmp_path / "inputs")
     job = next(j for j in timeline_jobs(report) if j["planner"] == "mpc")

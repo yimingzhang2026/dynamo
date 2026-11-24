@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-23T18:16:27.695681+00:00",
+  "generated_at": "2026-11-24T19:09:38.022533+00:00",
   "counts": {
     "completed": 360
   },
@@ -88,21 +88,21 @@
     },
     {
       "path": "inputs/static-latency.json",
-      "bytes": 469205,
-      "sha256": "63c392891964f6f155f7c73aa7e68ee73c59a2178d2067326c4d053e12c1be12"
+      "bytes": 481380,
+      "sha256": "7852a13cfb9157cf04204eea197de91a9c6db6faddaa654e6467d9fa03a36684"
     },
     {
       "path": "inputs/results.json",
-      "bytes": 2872333,
-      "sha256": "0ab2b85b01e00632b1151438db45ac8ea763cd588e7b4ce4f2e2ad2340a80696"
+      "bytes": 2872617,
+      "sha256": "0828efac7dbc9b3da8ac0ac1dd4f6d5083803b563ce7e4377c483d5509772525"
     }
   ],
   "static_latency": {
     "validated_runs": 60,
     "input_manifest": {
       "path": "inputs/static-latency.json",
-      "bytes": 469205,
-      "sha256": "63c392891964f6f155f7c73aa7e68ee73c59a2178d2067326c4d053e12c1be12"
+      "bytes": 481380,
+      "sha256": "7852a13cfb9157cf04204eea197de91a9c6db6faddaa654e6467d9fa03a36684"
     }
   },
   "diagnostics": {
@@ -114,12 +114,12 @@
       {
         "path": "inputs/red-diagnoses.json",
         "bytes": 38898,
-        "sha256": "2b0250929ed5a94da06802960622af5b2bde7af70c552b97273f4236b471e39f"
+        "sha256": "db53700601e9a017b6c787159b67e6a12653a33b71a419840f671423ece8aa93"
       },
       {
         "path": "inputs/diagnostic-evidence.json",
-        "bytes": 977180,
-        "sha256": "dcb14315d1dcfee5b0667215264e05531d1e77a69923468755bfe2e290b9fa1a"
+        "bytes": 975658,
+        "sha256": "f8e300dad951f4b91bb51de60a3ebb7baa3c4b437275c5761a879052dc6818ee"
       }
     ]
   },
@@ -129,24 +129,29 @@
     "input_manifest": {
       "path": "inputs/experiment-setup.json",
       "bytes": 35718,
-      "sha256": "9aceecaa46b4a4499cbeb2c98ad8072d82453aa4b8e5e701dfa49c2378ef6dea"
+      "sha256": "5b2e8abc347cb2e0dae9b1c507c02e4c334d1441c2f55894edcd96dd046df221"
     }
   },
   "trace_view": {
     "arrival_series": 60,
     "timeline_runs": {
-      "mpc": 0,
-      "planner": 0,
-      "keda": 0,
-      "reactive": 0,
-      "static": 0,
-      "knowline31b": 0
+      "mpc": 60,
+      "planner": 60,
+      "keda": 60,
+      "reactive": 60,
+      "static": 60,
+      "knowline31b": 60
     },
     "input_manifest": [
       {
         "path": "inputs/arrivals.json",
         "bytes": 125545,
         "sha256": "e97c5fd6aeec09701ce9623ba6e9ddd4da63d1c37c3cb74c56b1199c3a0f6730"
+      },
+      {
+        "path": "inputs/timelines.json",
+        "bytes": 9294214,
+        "sha256": "b9893de50573a177e1354144186e6c7c5099138b8b76017ae48375332e7df71a"
       }
     ]
   }

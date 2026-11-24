@@ -441,6 +441,7 @@ def validate_static_latency(entry, case):
                 else {"prefill": fixed["num_prefill"], "decode": fixed["num_decode"]}
             ),
             "simulated_gpus": job["fixed_gpus"],
+            **({"replay": saved["replay"]} if saved.get("replay") else {}),
         },
         "provenance": {
             **saved["runtime"],

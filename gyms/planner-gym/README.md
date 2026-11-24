@@ -19,8 +19,10 @@ against the shared ceiling.
 
 ## Saved results
 
-The `efficiency-plus3-20261106` campaign has **360/360 completed results**:
-six planners on 30 aggregated and 30 disaggregated traces. These tables are a
+The benchmark has **360/360 completed results**: six planners on 30 aggregated
+and 30 disaggregated traces, replayed on 2026-11-23 and 2026-11-24 on the plan
+of the `efficiency-plus3-20261106` campaign
+([how they reproduce](docs/reproducibility.md)). These tables are a
 snapshot of [leaderboard-summary.csv](leaderboards/60traces/leaderboard-summary.csv),
 using the `all` regime for each topology.
 
@@ -41,8 +43,8 @@ Every planner completed all 30 traces; all 30 enter the comparison.
 | ---: | --- | ---: | ---: | ---: | ---: |
 | 1 | Cognitive Agent | 2.467 | 5.00 | 58.26% | 20,011.3 |
 | 2 | cloudAI-MPC | 2.700 | 7.50 | 57.43% | 18,821.9 |
-| 3 | Static | 2.733 | 10.50 | 63.93% | 27,718.9 |
-| 4 | Dynamo | 3.733 | 5.00 | 81.57% | 30,488.8 |
+| 3 | Static | 2.767 | 10.50 | 63.93% | 27,718.9 |
+| 4 | Dynamo | 3.700 | 5.00 | 81.23% | 30,301.1 |
 | 5 | KEDA | 4.500 | 0.00 | 28.46% | 13,084.4 |
 | 6 | Reactive | 4.867 | 2.00 | 21.26% | 10,952.0 |
 
@@ -53,7 +55,7 @@ Every planner completed all 30 traces; all 30 enter the comparison.
 | Position | Planner | Mean rank ↓ | Wins ↑ | Mean good rate ↑ | Simulated GPU-hours |
 | ---: | --- | ---: | ---: | ---: | ---: |
 | 1 | cloudAI-MPC | 2.517 | 12.00 | 76.93% | 18,787.5 |
-| 2 | Dynamo | 3.017 | 6.50 | 62.30% | 15,490.7 |
+| 2 | Dynamo | 3.017 | 6.50 | 62.33% | 15,501.6 |
 | 3 | Cognitive Agent | 3.333 | 2.00 | 79.78% | 23,525.8 |
 | 4 | Static | 3.433 | 5.83 | 65.53% | 23,897.4 |
 | 5 | Reactive | 3.967 | 2.33 | 61.60% | 19,162.5 |
@@ -166,13 +168,14 @@ resident-GPU audits and complete trace measurements. The publisher accepts all
 300 CPU and 60 KnowLine exports and refreshes analysis for their exact hashes.
 Detailed timeline extraction remains available through `extract_diagnostics.py`.
 
-The local `runs/efficiency-plus3-20261106/` retains the current campaign's 360
-compact exports, transfer manifests and source/runtime identity receipts.
-Large input traces and these local bundles are ignored by Git. Reconstruct
-and verify the current saved tables through the same entry point:
+The local `runs/efficiency-plus3-20261106/` retains the first campaign's 360
+compact exports, transfer manifests and source/runtime identity receipts. It is
+the default `--collection`, so `publish` without one puts that campaign's
+results back in place of the saved replays. Large input traces and these local
+bundles are ignored by Git. Verify the current saved tables with:
 
 ```bash
-python scripts/run_campaign.py publish
+python leaderboards/60traces/build_leaderboards.py --check
 ```
 
 The versioned compact `inputs/` remain sufficient to rebuild HTML after a fresh

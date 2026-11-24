@@ -111,6 +111,12 @@ def static_entry(record, case, config):
     }
     if "aisimulate" not in result["runtime"]["packages"]:
         result["runtime"]["packages"]["aisimulate"] = versions["aisimulate_version"]
+    replay = saved.get("runtime", {}).get("replay", {})
+    if replay.get("telemetry_sha256"):
+        # Binds this run's time series to it, as for the scaling planners.
+        result["replay"] = {
+            k: replay[k] for k in ("telemetry_sha256", "telemetry_sample_count")
+        }
     entry = {
         k: record[k]
         for k in ("source_path", "source_sha256", "source_bytes", "configuration")
