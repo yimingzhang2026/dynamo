@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-24T19:09:38.022533+00:00",
+  "generated_at": "2026-11-24T20:15:23.803194+00:00",
   "counts": {
     "completed": 360
   },
@@ -113,8 +113,8 @@
     "input_manifest": [
       {
         "path": "inputs/red-diagnoses.json",
-        "bytes": 38898,
-        "sha256": "db53700601e9a017b6c787159b67e6a12653a33b71a419840f671423ece8aa93"
+        "bytes": 38836,
+        "sha256": "83f555a3fcbf0ee2cfe7a625a515dc7855fc4c01f32751efbcd0569a2d82bf77"
       },
       {
         "path": "inputs/diagnostic-evidence.json",

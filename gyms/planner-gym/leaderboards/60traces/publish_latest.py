@@ -141,6 +141,11 @@ def refresh(inputs, exports, *, diagnostics=()):
     return make_report(inputs)
 
 
+def counted(number, noun):
+    """A count with its noun: '1 worker', '3 workers'."""
+    return f"{number:,.0f} {noun}" + ("" if round(number) == 1 else "s")
+
+
 def timeline_explanation(saved, case, setup):
     timeline = saved["timeline"]
     stats = timeline["stats"]
@@ -148,17 +153,17 @@ def timeline_explanation(saved, case, setup):
         role: stats[f"queued_{role}_requests"]["max"] for role in ("prefill", "decode")
     }
     if case["topology"] == "agg":
-        queue = f"The queue peaked at {peaks['decode']:,.0f} requests."
+        queue = f"The queue peaked at {counted(peaks['decode'], 'request')}."
     else:
-        queue = f"Queues peaked at {peaks['prefill']:,.0f} prefill and {peaks['decode']:,.0f} decode requests."
+        queue = f"Queues peaked at {peaks['prefill']:,.0f} prefill and {counted(peaks['decode'], 'decode request')}."
     fleet = timeline["fleet_residence"][0]
     share = fleet["seconds"] / case["duration_s"]
     allocation = (
-        f"{fleet['decode']} shared workers"
+        counted(fleet["decode"], "shared worker")
         if case["topology"] == "agg"
-        else f"{fleet['prefill']} prefill and {fleet['decode']} decode workers"
+        else f"{fleet['prefill']} prefill and {counted(fleet['decode'], 'decode worker')}"
     )
-    observation = f"{queue} The most frequent ready fleet was {allocation}, present for {share:.1%} of the arrival window; the ready fleet changed {timeline['fleet_changes']:,} times."
+    observation = f"{queue} The most frequent ready fleet was {allocation}, present for {share:.1%} of the arrival window; the ready fleet changed {counted(timeline['fleet_changes'], 'time')}."
     if setup["min_gpus"] == setup["gpu_budget"]:
         note = f"The minimum fleet uses all {setup['gpu_budget']} available GPUs. No larger fleet is feasible under this case's budget, so scaling cannot add capacity to relieve the observed queues."
     else:

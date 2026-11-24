@@ -4,6 +4,7 @@
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -276,6 +277,18 @@ def test_timeline_import_rejects_evidence_from_another_result(tmp_path):
     )
     with pytest.raises(ValueError, match="Timeline does not match current result"):
         refresh_diagnostics(tmp_path, report, [supplied])
+
+
+def test_diagnoses_use_the_singular_for_one():
+    from publish_latest import counted
+
+    assert counted(1, "shared worker") == "1 shared worker"
+    assert counted(1.3, "request") == "1 request"
+    assert counted(0, "time") == "0 times"
+    assert counted(7268.4, "decode request") == "7,268 decode requests"
+    saved = json.loads((ROOT / "inputs/red-diagnoses.json").read_text())["rows"]
+    slips = re.compile(r"\b1 (\w+ )?(workers|requests|times)\b")
+    assert not [key for key, row in saved.items() if slips.search(row["summary"])]
 
 
 @pytest.mark.parametrize("change", ["duplicate", "missing", "unexpected"])
